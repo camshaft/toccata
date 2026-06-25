@@ -1,0 +1,11 @@
+/target
+**/*.rs.bk
+*.wf.js
+
+# Personal remote-dev helpers (rsync-to-host / scoreboard runner) — not for the
+# public repo; they hard-code a private dev host. Kept locally, never tracked.
+/x.sh
+/scripts/
+
+# Claude Code local settings (per-user)
+.claude/settings.local.json

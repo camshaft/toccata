@@ -1,0 +1,33 @@
+[package]
+name = "toccata-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Core of the toccata allocator: reservation, per-CPU slab, size classes, sub-heaps, pools"
+
+[dependencies]
+libc.workspace = true
+allocator-api2.workspace = true
+linkme.workspace = true
+
+# The atomic-free rseq inline-asm fast path is NOT a feature: it compiles in
+# automatically on Linux x86_64/aarch64 (and falls back to the locked baseline at
+# runtime on kernels without rseq), so there is nothing to opt into.
+[features]
+default = []
+# Background supervisor (reclaim/rebalance/seize).
+supervisor = []
+# Per-`SubHeap` live-usage query (`metrics::usage`).
+metrics = []
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [
+    'cfg(toccata_no_accounting)',
+    # Test-only: disables the cross-class-reclaim `central_take` class re-validation
+    # so the stale-`reuse_hint` double-hand-out regression test can prove it catches
+    # the bug (negative control). Never set in normal builds.
+    'cfg(toccata_reclaim_negative_control)',
+] }

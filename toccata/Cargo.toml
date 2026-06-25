@@ -1,0 +1,28 @@
+[package]
+name = "toccata"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "toccata: a never-stall global allocator (install!) over the toccata-core primitives"
+
+[features]
+default = []
+# Opt-in background supervisor: enables toccata-core's supervisor and lets
+# `configure` start a reclaim-only sweep thread (env-gated by TOCCATA_SUPERVISOR).
+# The sweep returns fully-free spans across size classes (the `frag crossclass`
+# fix) and takes only central spin locks — no kernel call, no membarrier — so it
+# stays on the never-stall path. Off by default so the minimal global build is
+# unaffected.
+supervisor = ["toccata-core/supervisor"]
+
+[dependencies]
+# default-features = false is load-bearing: it guarantees cargo feature
+# unification can never silently pull toccata-core's supervisor/metrics into the
+# global build. The global allocator needs only the core SubHeap/sys surface. (The
+# rseq fast path is not a feature — it auto-compiles on Linux x86_64/aarch64.)
+toccata-core = { path = "../toccata-core", default-features = false }
+ctor = "0.2"
+libc.workspace = true

@@ -1,0 +1,31 @@
+[workspace]
+resolver = "2"
+members = [
+    "toccata-core",
+    "toccata",
+    "toccata-bench",
+]
+# toccata-loom is excluded from the default workspace build: it only compiles
+# under `--cfg loom` with the loom shims. Built explicitly in CI.
+exclude = ["toccata-loom"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.81"
+license = "MIT"
+repository = "https://github.com/camshaft/toccata"
+authors = ["Cameron Bytheway"]
+
+[workspace.dependencies]
+libc = "0.2.170"
+allocator-api2 = { version = "0.2", default-features = false, features = ["alloc"] }
+linkme = "0.3"
+
+[profile.release]
+debug = true        # keep symbols for perf/benchmark profiling
+codegen-units = 1
+lto = "thin"
+
+[profile.bench]
+debug = true

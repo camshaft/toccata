@@ -1,0 +1,33 @@
+[package]
+name = "toccata-bench"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Benchmarks comparing toccata against system/jemalloc/mimalloc/snmalloc"
+publish = false
+
+# The workloads live in the library; each binary under src/bin/ installs ONE
+# allocator as the #[global_allocator] and calls into the shared workloads. The
+# allocator under test is chosen by *which binary you run*, not a cargo feature —
+# so there are no mutually-exclusive features and no `--all-features` conflict:
+#
+#   cargo run -p toccata-bench --release --bin system    -- throughput
+#   cargo run -p toccata-bench --release --bin jemalloc  -- latency-tail 5 300
+#   TOCCATA_BENCH_MB=2048 cargo run -p toccata-bench --release --bin toccata -- micro
+#
+# (the comparison allocators are plain dependencies, compiled once and cached;
+# only the binary that names one as its #[global_allocator] actually uses it.)
+
+[dependencies]
+# `supervisor` enables toccata's env-gated background reclaim sweep (the `frag
+# crossclass` fix); inert unless TOCCATA_SUPERVISOR=1 at runtime, and only the
+# `toccata` bin installs toccata as the allocator, so the other bins are
+# unaffected.
+toccata = { path = "../toccata", features = ["supervisor"] }
+tikv-jemallocator = "0.7"
+mimalloc = { version = "0.1", default-features = false }
+snmalloc-rs = "0.7"
+libc.workspace = true
