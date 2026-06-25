@@ -69,11 +69,15 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
-      # A large part of the allocator is `#[cfg(target_os = "linux")]` (the rseq
-      # inline-asm fast path, the mmap+mlock reservation). macOS compiles all of
-      # that out, so clippy must run on BOTH to lint both sides of the cfg.
+      # The rseq fast path is hand-written inline asm with SEPARATE x86_64 and
+      # aarch64 implementations, all `#[cfg(target_os = "linux")]`. So we must lint
+      # every (arch × os) corner that selects different code:
+      #   ubuntu-latest   → x86_64 Linux  (the x86 asm)
+      #   ubuntu-24.04-arm → aarch64 Linux (the aarch64 asm — what ships on Graviton)
+      #   macOS-latest    → aarch64, but the Linux-only asm/mlock paths compile out
+      #                     (exercises the portable dev fallback)
       matrix:
-        os: [ubuntu-latest, macOS-latest]
+        os: [ubuntu-latest, ubuntu-24.04-arm, macOS-latest]
     steps:
       - uses: actions/checkout@v7
 
@@ -150,10 +154,13 @@ jobs:
       fail-fast: false
       matrix:
         rust: ${{ fromJson(needs.env.outputs.rust-versions) }}
-        # Linux + macOS. Linux is the real target (rseq / mlock / membarrier);
-        # macOS builds via the portable dev fallback and runs the platform-neutral
-        # tests (the Linux-only integration tests self-`cfg` out there).
-        os: [ubuntu-latest, macOS-latest]
+        # Both Linux arches + macOS. Linux is the real target (rseq / mlock /
+        # membarrier), and x86_64 vs aarch64 run DIFFERENT hand-written rseq asm,
+        # so both must be tested — `ubuntu-24.04-arm` exercises the aarch64 asm
+        # that ships on Graviton. macOS builds via the portable dev fallback and
+        # runs the platform-neutral tests (the Linux-only integration tests
+        # self-`cfg` out there).
+        os: [ubuntu-latest, ubuntu-24.04-arm, macOS-latest]
     steps:
       - uses: actions/checkout@v7
 
