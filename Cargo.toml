@@ -18,7 +18,7 @@ authors = ["Cameron Bytheway"]
 
 [workspace.dependencies]
 libc = "0.2.170"
-allocator-api2 = { version = "0.2", default-features = false, features = ["alloc"] }
+allocator-api2 = { version = "0.4", default-features = false, features = ["alloc"] }
 linkme = "0.3"
 # default-features = false is load-bearing and set here at the root so every
 # inheritor gets it: it guarantees cargo feature unification can never silently
