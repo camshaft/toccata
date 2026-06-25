@@ -13,7 +13,10 @@ static A: toccata::Toccata = toccata::Toccata::new();
 fn main() {
     // `TOCCATA_SHARDS=N` overrides the central-list shard count (default 4*ncpu)
     // for experiments; otherwise the standard `configure`.
-    if let Some(n) = std::env::var("TOCCATA_SHARDS").ok().and_then(|s| s.parse::<u32>().ok()) {
+    if let Some(n) = std::env::var("TOCCATA_SHARDS")
+        .ok()
+        .and_then(|s| s.parse::<u32>().ok())
+    {
         let builder = toccata::primitives::SubHeapBuilder::new(
             "global",
             toccata_bench::toccata_budget_bytes(),

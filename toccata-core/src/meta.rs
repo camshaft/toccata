@@ -86,8 +86,12 @@ impl SpanBitmaps {
             free_words: crate::sys_boxed_slice(num_spans * SPAN_BITMAP_WORDS, |_| {
                 core::sync::atomic::AtomicU64::new(0)
             }),
-            next_active: crate::sys_boxed_slice(num_spans, |_| core::cell::UnsafeCell::new(NO_SPAN)),
-            on_list: crate::sys_boxed_slice(num_spans, |_| core::sync::atomic::AtomicBool::new(false)),
+            next_active: crate::sys_boxed_slice(num_spans, |_| {
+                core::cell::UnsafeCell::new(NO_SPAN)
+            }),
+            on_list: crate::sys_boxed_slice(num_spans, |_| {
+                core::sync::atomic::AtomicBool::new(false)
+            }),
         }
     }
 
@@ -329,7 +333,9 @@ pub struct SpanMeta {
 
 impl SpanMeta {
     const fn new() -> Self {
-        Self { packed: AtomicU32::new(0) }
+        Self {
+            packed: AtomicU32::new(0),
+        }
     }
 
     #[inline]
@@ -339,7 +345,8 @@ impl SpanMeta {
 
     #[inline]
     pub fn assign(&self, class: u16, home_cpu: u16) {
-        self.packed.store(Self::pack(class, home_cpu), Ordering::Release);
+        self.packed
+            .store(Self::pack(class, home_cpu), Ordering::Release);
     }
 
     /// Returns `(class, home_cpu)` or `None` if unassigned.
@@ -395,7 +402,11 @@ impl SpanTable {
     pub fn new(base: *mut u8, len: usize) -> Self {
         let num_spans = len.div_ceil(SPAN_BYTES);
         let entries = crate::sys_boxed_slice(num_spans, |_| SpanMeta::new());
-        Self { base: base as usize, len, entries }
+        Self {
+            base: base as usize,
+            len,
+            entries,
+        }
     }
 
     #[inline]
@@ -477,7 +488,10 @@ mod tests {
         // Assign a class-7 span homed on CPU 3 at offset 0.
         table.assign_range(base, SPAN_BYTES, 7, 3);
         assert_eq!(table.lookup(base), Some((7, 3)));
-        assert_eq!(table.lookup(unsafe { base.add(SPAN_BYTES - 1) }), Some((7, 3)));
+        assert_eq!(
+            table.lookup(unsafe { base.add(SPAN_BYTES - 1) }),
+            Some((7, 3))
+        );
         // The next span is unassigned.
         assert_eq!(table.lookup(unsafe { base.add(SPAN_BYTES) }), None);
         // Out of range.
@@ -491,6 +505,9 @@ mod tests {
         // A large object spanning 2.5 spans.
         table.assign_range(base, SPAN_BYTES * 2 + 100, 40, 1);
         assert_eq!(table.lookup(base), Some((40, 1)));
-        assert_eq!(table.lookup(unsafe { base.add(SPAN_BYTES * 2) }), Some((40, 1)));
+        assert_eq!(
+            table.lookup(unsafe { base.add(SPAN_BYTES * 2) }),
+            Some((40, 1))
+        );
     }
 }

@@ -45,7 +45,7 @@ fn pool_is_live_before_main_and_serves_std() {
     for _ in 0..5000 {
         s.push_str("toccata");
     }
-    assert_eq!(s.len(), 40_000);
+    assert_eq!(s.len(), 35_000); // "toccata" is 7 bytes × 5000
 
     let mut m = std::collections::HashMap::new();
     for i in 0..20_000u64 {

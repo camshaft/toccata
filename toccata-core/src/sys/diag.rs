@@ -64,6 +64,9 @@ mod tests {
         assert_eq!(usize_to_dec(0, &mut buf), b"0");
         assert_eq!(usize_to_dec(7, &mut buf), b"7");
         assert_eq!(usize_to_dec(12345, &mut buf), b"12345");
-        assert_eq!(usize_to_dec(usize::MAX, &mut buf), usize::MAX.to_string().as_bytes());
+        assert_eq!(
+            usize_to_dec(usize::MAX, &mut buf),
+            usize::MAX.to_string().as_bytes()
+        );
     }
 }

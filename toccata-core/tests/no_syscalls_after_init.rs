@@ -218,12 +218,18 @@ fn first_hex_arg(line: &str) -> Option<usize> {
     let open = line.find('(')?;
     let arg = &line[open + 1..];
     let hex = arg.strip_prefix("0x")?;
-    let end = hex.find(|c: char| !c.is_ascii_hexdigit()).unwrap_or(hex.len());
+    let end = hex
+        .find(|c: char| !c.is_ascii_hexdigit())
+        .unwrap_or(hex.len());
     usize::from_str_radix(&hex[..end], 16).ok()
 }
 
 fn which(bin: &str) -> Option<String> {
-    let out = Command::new("sh").arg("-c").arg(format!("command -v {bin}")).output().ok()?;
+    let out = Command::new("sh")
+        .arg("-c")
+        .arg(format!("command -v {bin}"))
+        .output()
+        .ok()?;
     if out.status.success() {
         Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
     } else {

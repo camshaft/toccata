@@ -24,8 +24,10 @@
 //! passed in; this module is geometry + synchronization only.
 
 use crate::rseq::abi;
-use core::ptr::NonNull;
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::{
+    ptr::NonNull,
+    sync::atomic::{AtomicU32, Ordering},
+};
 
 /// Per-class location within a CPU block, in bytes from the block base.
 #[derive(Clone, Copy, Debug)]
@@ -101,7 +103,13 @@ impl SlabLayout {
             v.push(StopFlag::new());
         }
         let stopped: &'static [StopFlag] = allocator_api2::vec::Vec::leak(v);
-        Self { base, num_cpus, shift, classes, stopped }
+        Self {
+            base,
+            num_cpus,
+            shift,
+            classes,
+            stopped,
+        }
     }
 
     /// Set/clear a CPU's stop flag (supervisor only). `seq_cst` so it orders with
@@ -115,7 +123,10 @@ impl SlabLayout {
 
     #[inline]
     fn is_stopped(&self, cpu: u32) -> bool {
-        self.stopped[(cpu as usize).min(self.stopped.len() - 1)].0.load(Ordering::Acquire) != 0
+        self.stopped[(cpu as usize).min(self.stopped.len() - 1)]
+            .0
+            .load(Ordering::Acquire)
+            != 0
     }
 
     /// Direct access to a class header for the supervisor's seize-time mutation.
@@ -163,7 +174,9 @@ impl SlabLayout {
 
     #[inline]
     fn lock(&self, cpu: u32, class: usize) -> &AtomicU32 {
-        unsafe { &*(self.block(cpu).add(self.classes[class].lock_off as usize) as *const AtomicU32) }
+        unsafe {
+            &*(self.block(cpu).add(self.classes[class].lock_off as usize) as *const AtomicU32)
+        }
     }
 }
 
@@ -205,11 +218,17 @@ impl<'a> CpuStack<'a> {
     /// TLS read off every fast-path alloc/free.
     #[inline]
     pub fn current_fast(layout: &'a SlabLayout) -> Self {
-        #[cfg(all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64")))]
+        #[cfg(all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ))]
         {
             // cpu is resolved by the asm; use an out-of-range sentinel that the
             // locked fallback re-resolves if ever reached.
-            return Self { layout, cpu: u32::MAX };
+            return Self {
+                layout,
+                cpu: u32::MAX,
+            };
         }
         #[allow(unreachable_code)]
         Self::current(layout)
@@ -294,7 +313,10 @@ impl<'a> CpuStack<'a> {
     /// This is the public hot-path entry.
     #[inline]
     pub fn pop(&self, class: usize) -> Fast<NonNull<u8>> {
-        #[cfg(all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64")))]
+        #[cfg(all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ))]
         {
             let loc = self.layout.classes[class];
             // SAFETY: layout describes a live region; loc offsets are in-bounds.
@@ -331,7 +353,10 @@ impl<'a> CpuStack<'a> {
     /// entry the allocator uses.
     #[inline]
     pub fn pop_on(&self, class: usize) -> (Fast<NonNull<u8>>, u32) {
-        #[cfg(all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64")))]
+        #[cfg(all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ))]
         {
             let loc = self.layout.classes[class];
             let r = unsafe {
@@ -352,7 +377,9 @@ impl<'a> CpuStack<'a> {
                         None => (Fast::NeedsSlow, cpu),
                     };
                 }
-                crate::rseq::asm::RseqResult::NeedsSlow => return (Fast::NeedsSlow, self.resolved_cpu()),
+                crate::rseq::asm::RseqResult::NeedsSlow => {
+                    return (Fast::NeedsSlow, self.resolved_cpu())
+                }
                 crate::rseq::asm::RseqResult::Fallback => {}
             }
         }
@@ -362,7 +389,10 @@ impl<'a> CpuStack<'a> {
     /// Push one pointer for `class`, RSEQ fast path when compiled in.
     #[inline]
     pub fn push(&self, class: usize, obj: NonNull<u8>) -> Fast<()> {
-        #[cfg(all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64")))]
+        #[cfg(all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ))]
         {
             let loc = self.layout.classes[class];
             // SAFETY: as `pop`.
@@ -390,7 +420,10 @@ impl<'a> CpuStack<'a> {
     /// Like [`CpuStack::push`] but also returns the committed CPU for accounting.
     #[inline]
     pub fn push_on(&self, class: usize, obj: NonNull<u8>) -> (Fast<()>, u32) {
-        #[cfg(all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64")))]
+        #[cfg(all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ))]
         {
             let loc = self.layout.classes[class];
             let r = unsafe {
@@ -407,7 +440,9 @@ impl<'a> CpuStack<'a> {
             };
             match r {
                 crate::rseq::asm::RseqResult::Ok(_, cpu) => return (Fast::Ok(()), cpu),
-                crate::rseq::asm::RseqResult::NeedsSlow => return (Fast::NeedsSlow, self.resolved_cpu()),
+                crate::rseq::asm::RseqResult::NeedsSlow => {
+                    return (Fast::NeedsSlow, self.resolved_cpu())
+                }
                 crate::rseq::asm::RseqResult::Fallback => {}
             }
         }

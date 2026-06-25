@@ -13,12 +13,13 @@
 //! central free lists carved from the slice, per-sub-heap byte budget. Remote
 //! free, the supervisor, and the rseq fast path arrive in later phases.
 
-use crate::sizeclass::{self};
-use crate::sys::Reservation;
-use crate::rseq::slab::{ClassLoc, CpuStack, Fast, Header, SlabLayout};
+use crate::{
+    rseq::slab::{ClassLoc, CpuStack, Fast, Header, SlabLayout},
+    sizeclass::{self},
+    sys::Reservation,
+};
 use core::sync::atomic::Ordering;
-use std::ptr::NonNull;
-use std::sync::Mutex;
+use std::{ptr::NonNull, sync::Mutex};
 
 /// Exhaustion policy for a sub-heap.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -190,8 +191,12 @@ impl BumpArena {
             }
             let take_spans = num_spans.min(avail_spans);
             let end = start + take_spans * span_bytes;
-            match self.cursor.compare_exchange_weak(start, end, Ordering::Relaxed, Ordering::Relaxed)
-            {
+            match self.cursor.compare_exchange_weak(
+                start,
+                end,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
                 Ok(_) => break end,
                 Err(s) => start = s,
             }
@@ -231,7 +236,10 @@ impl BumpArena {
             if end > self.end {
                 return None;
             }
-            match self.cursor.compare_exchange_weak(cur, end, Ordering::Relaxed, Ordering::Relaxed) {
+            match self
+                .cursor
+                .compare_exchange_weak(cur, end, Ordering::Relaxed, Ordering::Relaxed)
+            {
                 Ok(_) => return Some(start as *mut u8),
                 Err(c) => cur = c,
             }
@@ -289,7 +297,9 @@ unsafe impl Sync for PerCpuCounters {}
 
 impl PerCpuCounters {
     fn new(num_cpus: u32) -> Self {
-        Self { cells: crate::sys_boxed_slice(num_cpus.max(1) as usize, |_| CpuCounter::new()) }
+        Self {
+            cells: crate::sys_boxed_slice(num_cpus.max(1) as usize, |_| CpuCounter::new()),
+        }
     }
 
     #[inline]
@@ -428,10 +438,10 @@ fn batch_for(class: usize) -> usize {
 fn cap_for_class(class: usize, base: u32) -> u32 {
     let sz = sizeclass::size_of_class(class);
     let tier = match sz {
-        0..=512 => base,            // small: full cache (hot-path hit rate)
-        513..=4096 => base / 2,     // medium
-        4097..=32768 => base / 4,   // large-ish
-        _ => 24,                    // 48/64/96/128/192/256 KiB: a couple-dozen spans
+        0..=512 => base,          // small: full cache (hot-path hit rate)
+        513..=4096 => base / 2,   // medium
+        4097..=32768 => base / 4, // large-ish
+        _ => 24,                  // 48/64/96/128/192/256 KiB: a couple-dozen spans
     };
     tier.min(base).max(8)
 }
@@ -632,7 +642,7 @@ impl SubHeap {
         // `SPAN_BYTES/osz` floors to 0, the scan reads no words, and those frees are
         // never reclaimed (the arena then drains to a false budget exhaustion).
         let slots_per_span = (super::meta::SPAN_BYTES / osz).max(1);
-        let nwords = (slots_per_span + 63) / 64;
+        let nwords = slots_per_span.div_ceil(64);
         let mut n = 0;
 
         // Reuse hint: for **large classes** (few objects per span, so a thread's live
@@ -659,7 +669,9 @@ impl SubHeap {
             // can only point at a span this very class owns.)
             if h != super::meta::NO_SPAN
                 && (cfg!(toccata_reclaim_negative_control)
-                    || self.spans.lookup(self.bitmaps.span_base(h) as *const u8)
+                    || self
+                        .spans
+                        .lookup(self.bitmaps.span_base(h) as *const u8)
                         .is_some_and(|(hc, _)| hc as usize == class))
             {
                 n = self.scan_span(h, out, n, nwords, osz);
@@ -780,7 +792,8 @@ impl SubHeap {
         drop(inner);
         let start = self.large.span_ptr(head_idx) as usize;
         let end = start + num_spans * super::meta::SPAN_BYTES;
-        self.spans.assign_range(start as *const u8, end - start, class, home);
+        self.spans
+            .assign_range(start as *const u8, end - start, class, home);
         Some((start, end))
     }
 
@@ -825,8 +838,7 @@ impl SubHeap {
         // at once: a full word = all 64 slots free, then a partial last word).
         let per_span = span_bytes / osz;
         let want_spans = batch.div_ceil(per_span).max(1);
-        let (start, run_end) =
-            self.carve_or_reuse_spans(want_spans, class as u16, my_shard as u16);
+        let (start, run_end) = self.carve_or_reuse_spans(want_spans, class as u16, my_shard as u16);
         if run_end <= start {
             return 0;
         }
@@ -873,7 +885,9 @@ impl SubHeap {
     /// class-revalidation that closes the stale-hint cross-class double-hand-out.
     #[doc(hidden)]
     pub fn test_set_reuse_hint(&self, shard: u32, class: usize, span: u32) {
-        self.central(shard, class).reuse_hint.store(span, Ordering::Relaxed);
+        self.central(shard, class)
+            .reuse_hint
+            .store(span, Ordering::Relaxed);
     }
 
     /// The `[base, len)` of this sub-heap's backing reservation, for tests that
@@ -1027,10 +1041,14 @@ impl SubHeap {
         // (cache-hot) buffers first. A magazine flush shares one home shard, so one
         // hint write covers the batch; `cur_span` is the most recent deposit.
         if cur_span != super::meta::NO_SPAN {
-            let home = (self.spans.home_relaxed(self.bitmaps.span_base(cur_span) as *const u8)
+            let home = (self
+                .spans
+                .home_relaxed(self.bitmaps.span_base(cur_span) as *const u8)
                 as u32)
                 % self.num_shards;
-            self.central(home, class).reuse_hint.store(cur_span, Ordering::Relaxed);
+            self.central(home, class)
+                .reuse_hint
+                .store(cur_span, Ordering::Relaxed);
         }
 
         // Charge the whole batch (local + remote) to the freeing CPU's own cell
@@ -1219,7 +1237,8 @@ impl SubHeap {
                         LARGE_CLASS,
                         0,
                     );
-                    self.bitmaps.reset_bitmaps(span, slots_per_span.div_ceil(64));
+                    self.bitmaps
+                        .reset_bitmaps(span, slots_per_span.div_ceil(64));
                     taken[n] = span;
                     n += 1;
                     // `prev` stays; the list now skips `span` so its predecessor's
@@ -1239,7 +1258,9 @@ impl SubHeap {
         // handed out by `alloc_large` or a future small carve that probes the pool.
         let mut inner = self.large.inner.lock().unwrap();
         for &span in &taken[..n] {
-            let idx = self.large.span_index(self.bitmaps.span_base(span) as *const u8) as u32;
+            let idx = self
+                .large
+                .span_index(self.bitmaps.span_base(span) as *const u8) as u32;
             // run_spans head marker stays 0 until alloc_large hands it out; the pool
             // owns the free run by index.
             inner.pool.free(idx, group_spans);
@@ -1312,7 +1333,9 @@ impl SubHeap {
         self.large.run_spans[idx].store(span_count as u32, Ordering::Release);
         self.spans.assign_range(ptr, run_bytes, LARGE_CLASS, 0);
         drop(inner);
-        let cpu = crate::rseq::current_cpu().unwrap_or(0).min(self.counters.cells.len() as u32 - 1);
+        let cpu = crate::rseq::current_cpu()
+            .unwrap_or(0)
+            .min(self.counters.cells.len() as u32 - 1);
         self.counters.add_remote(cpu, run_bytes as i64, 1);
         Some(unsafe { NonNull::new_unchecked(ptr) })
     }
@@ -1334,7 +1357,9 @@ impl SubHeap {
         // memory — the pool tracks everything out-of-band by span index.
         inner.pool.free(idx, span_count as u32);
         drop(inner);
-        let cpu = crate::rseq::current_cpu().unwrap_or(0).min(self.counters.cells.len() as u32 - 1);
+        let cpu = crate::rseq::current_cpu()
+            .unwrap_or(0)
+            .min(self.counters.cells.len() as u32 - 1);
         self.counters.add_remote(cpu, -(run_bytes as i64), -1);
     }
 
@@ -1428,7 +1453,11 @@ impl SubHeap {
         if n > 0 {
             // Charge as local: these objects are now live, homed on this shard.
             let cpu = CpuStack::current(&self.slab).cpu();
-            self.counters.add_local(cpu, sizeclass::size_of_class(class) as i64 * n as i64, n as i64);
+            self.counters.add_local(
+                cpu,
+                sizeclass::size_of_class(class) as i64 * n as i64,
+                n as i64,
+            );
         }
         n
     }
@@ -1527,8 +1556,9 @@ impl SubHeapBuilder {
     /// Pre-populates every class's central list to fill the budget.
     pub fn build_standalone(self) -> Result<SubHeap, crate::sys::ReserveError> {
         let num_classes = sizeclass::NUM_CLASSES;
-        let num_shards =
-            self.num_shards.unwrap_or_else(|| (self.num_cpus * SHARDS_PER_CPU).clamp(1, MAX_SHARDS));
+        let num_shards = self
+            .num_shards
+            .unwrap_or_else(|| (self.num_cpus * SHARDS_PER_CPU).clamp(1, MAX_SHARDS));
 
         // --- compute per-CPU block geometry ---
         // Block layout: [ Header[num_classes] | lock[num_classes] | slots... ]
@@ -1619,5 +1649,7 @@ fn default_num_cpus() -> u32 {
             return n as u32;
         }
     }
-    std::thread::available_parallelism().map(|n| n.get() as u32).unwrap_or(4)
+    std::thread::available_parallelism()
+        .map(|n| n.get() as u32)
+        .unwrap_or(4)
 }

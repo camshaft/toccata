@@ -21,8 +21,7 @@
 //! central pool — a consistent, conservative definition — and the hot path is
 //! accounting-free.
 
-use crate::sizeclass::NUM_CLASSES;
-use crate::SubHeap;
+use crate::{sizeclass::NUM_CLASSES, SubHeap};
 use std::ptr::NonNull;
 
 /// Prefetch the first line of `p` for **writing** (read-for-ownership). Never faults
@@ -53,7 +52,10 @@ struct Magazine {
 
 impl Magazine {
     const fn new() -> Self {
-        Self { len: 0, ptrs: [core::ptr::null_mut(); MAG_CAP] }
+        Self {
+            len: 0,
+            ptrs: [core::ptr::null_mut(); MAG_CAP],
+        }
     }
 }
 
@@ -79,7 +81,9 @@ impl Default for ThreadCache {
 
 impl ThreadCache {
     pub const fn new() -> Self {
-        Self { mags: [const { Magazine::new() }; NUM_CLASSES] }
+        Self {
+            mags: [const { Magazine::new() }; NUM_CLASSES],
+        }
     }
 
     /// The pure L1 hot path: pop from the magazine for `class` with **no** other

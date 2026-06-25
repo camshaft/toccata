@@ -82,7 +82,11 @@ const fn build_lookup_const() -> [u16; LOOKUP_LEN] {
         while class < CLASS_SIZES.len() && CLASS_SIZES[class] < size {
             class += 1;
         }
-        table[i] = if class < CLASS_SIZES.len() { class as u16 } else { 0 };
+        table[i] = if class < CLASS_SIZES.len() {
+            class as u16
+        } else {
+            0
+        };
         i += 1;
     }
     table
@@ -121,8 +125,6 @@ pub fn aligned_class(need: usize, align: usize) -> Option<usize> {
     }
     Some(class)
 }
-
-/// The object size for a class id.
 
 #[cfg(test)]
 mod tests {

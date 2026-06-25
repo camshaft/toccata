@@ -32,11 +32,15 @@
 //! array), never threaded through a frame body — so a frame ceded to the kernel
 //! and later reclaimed by offset is sound.
 
-use crate::rseq::slab::{ClassLoc, CpuStack, Fast, Header, SlabLayout};
-use crate::sys::{Reservation, ReserveError, ReserveOpts};
-use crate::{sys_boxed_slice, Sys, SysBoxSlice};
-use core::cell::UnsafeCell;
-use core::sync::atomic::{fence, AtomicU32, AtomicUsize, Ordering};
+use crate::{
+    rseq::slab::{ClassLoc, CpuStack, Fast, Header, SlabLayout},
+    sys::{Reservation, ReserveError, ReserveOpts},
+    sys_boxed_slice, Sys, SysBoxSlice,
+};
+use core::{
+    cell::UnsafeCell,
+    sync::atomic::{fence, AtomicU32, AtomicUsize, Ordering},
+};
 use std::ptr::NonNull;
 
 /// How many frames move between a per-CPU slab and the central stack per
@@ -193,7 +197,11 @@ impl Central {
 
     #[inline]
     fn lock(&self) -> CentralGuard<'_> {
-        while self.lock.compare_exchange_weak(0, 1, Ordering::Acquire, Ordering::Relaxed).is_err() {
+        while self
+            .lock
+            .compare_exchange_weak(0, 1, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
             while self.lock.load(Ordering::Relaxed) != 0 {
                 core::hint::spin_loop();
             }
@@ -347,7 +355,9 @@ impl<M: FrameMeta + Send + Sync> FramePool<M> {
             return Err(FramePoolError::FrameSizeNotPow2(frame_size));
         }
         let mut opts = opts;
-        opts.len = n_frames.checked_mul(frame_size).expect("n_frames * frame_size overflow");
+        opts.len = n_frames
+            .checked_mul(frame_size)
+            .expect("n_frames * frame_size overflow");
         let reservation = Reservation::reserve_with(opts).map_err(FramePoolError::Reserve)?;
         Self::build(Region::Owned(reservation), frame_size)
     }
@@ -391,9 +401,15 @@ impl<M: FrameMeta + Send + Sync> FramePool<M> {
             // lock + slots already zero from the zeroed buffer.
         }
 
-        let classes: &'static [ClassLoc] = allocator_api2::boxed::Box::leak(
-            allocator_api2::boxed::Box::new_in([ClassLoc { header_off, slots_off, lock_off }], Sys),
-        );
+        let classes: &'static [ClassLoc] =
+            allocator_api2::boxed::Box::leak(allocator_api2::boxed::Box::new_in(
+                [ClassLoc {
+                    header_off,
+                    slots_off,
+                    lock_off,
+                }],
+                Sys,
+            ));
         // SAFETY: slab_base points at `slab_bytes` of live, correctly-carved,
         // 8-aligned storage held by `slab_buf` for the pool's lifetime.
         let slab = unsafe { SlabLayout::new(slab_base, num_cpus, shift, classes) };
@@ -467,9 +483,14 @@ impl<M: FrameMeta + Send + Sync> FramePool<M> {
     /// the frame must be logically owned by the caller again.
     #[inline]
     pub unsafe fn from_addr(&self, addr: u64) -> Frame {
-        debug_assert!((addr as usize) < self.n_frames * self.frame_size, "addr out of range");
+        debug_assert!(
+            (addr as usize) < self.n_frames * self.frame_size,
+            "addr out of range"
+        );
         debug_assert_eq!(addr as usize % self.frame_size, 0, "addr not frame-aligned");
-        Frame { ptr: NonNull::new_unchecked(self.frames_base.add(addr as usize)) }
+        Frame {
+            ptr: NonNull::new_unchecked(self.frames_base.add(addr as usize)),
+        }
     }
 
     /// Allocate a frame, or `None` if the pool is exhausted. The handle-free path:
@@ -558,7 +579,11 @@ impl<M: FrameMeta + Send + Sync> FramePool<M> {
     /// magazine flushes its frames back to the pool.
     #[inline]
     pub fn cache(&self) -> FrameCache<'_, M> {
-        FrameCache { pool: self, len: 0, ptrs: [core::ptr::null_mut(); FRAME_MAG_CAP] }
+        FrameCache {
+            pool: self,
+            len: 0,
+            ptrs: [core::ptr::null_mut(); FRAME_MAG_CAP],
+        }
     }
 
     /// Raw L2 frame acquire: the per-CPU rseq slab (refilling from central on a
@@ -731,7 +756,10 @@ impl<M: FrameMeta + Send + Sync> Drop for FrameCache<'_, M> {
         while self.len > 0 {
             self.len -= 1;
             // SAFETY: live free frame pointer from this pool.
-            unsafe { self.pool.push_l2(&stack, NonNull::new_unchecked(self.ptrs[self.len])) };
+            unsafe {
+                self.pool
+                    .push_l2(&stack, NonNull::new_unchecked(self.ptrs[self.len]))
+            };
         }
     }
 }
@@ -787,6 +815,11 @@ pub unsafe trait FrameSource: 'static {
 
 /// A concrete typed frame pool: a [`FrameSource`] whose frames each hold one value
 /// of type [`Item`](Self::Item) (the [`Owned`]/[`Shared`] story).
+///
+/// # Safety
+/// Implementors must back this with a real [`FrameSource`] whose frames are each
+/// sized and aligned for one [`Item`](Self::Item) at frame offset 0, so the
+/// `Owned`/`Shared` handles can treat the frame body as that value.
 pub unsafe trait TypedPool: FrameSource {
     /// The value stored one-per-frame.
     type Item: 'static;
@@ -823,7 +856,10 @@ impl<P: TypedPool> Owned<P> {
         let frame = P::alloc_frame()?;
         // SAFETY: a fresh frame is uninitialized storage of >= size_of::<Item>().
         unsafe { core::ptr::write(value_ptr::<P>(frame), value) };
-        Some(Self { frame, _pool: core::marker::PhantomData })
+        Some(Self {
+            frame,
+            _pool: core::marker::PhantomData,
+        })
     }
 
     /// Promote this unique handle into a refcounted [`Shared`]. Zero-cost: the
@@ -833,7 +869,10 @@ impl<P: TypedPool> Owned<P> {
     pub fn into_shared(self) -> Shared<P> {
         let frame = self.frame;
         core::mem::forget(self); // don't run Owned's Drop (would free the frame)
-        Shared { frame, _pool: core::marker::PhantomData }
+        Shared {
+            frame,
+            _pool: core::marker::PhantomData,
+        }
     }
 
     /// This frame's index in the backing pool (instrumentation / addressing).
@@ -914,7 +953,10 @@ impl<P: TypedPool> Clone for Shared<P> {
         // Relaxed add: holding a live handle proves the count is >= 1 and rising,
         // so no concurrent drop can spuriously reach zero (descriptor.rs discipline).
         unsafe { P::refcount(self.frame).retain() };
-        Shared { frame: self.frame, _pool: core::marker::PhantomData }
+        Shared {
+            frame: self.frame,
+            _pool: core::marker::PhantomData,
+        }
     }
 }
 
@@ -976,7 +1018,11 @@ impl<P: FrameSource> FrameMut<P> {
     pub fn new() -> Option<Self> {
         let frame = P::alloc_frame()?;
         let cap = P::frame_capacity().min(u16::MAX as usize) as u16;
-        Some(Self { frame, cap, _pool: core::marker::PhantomData })
+        Some(Self {
+            frame,
+            cap,
+            _pool: core::marker::PhantomData,
+        })
     }
 
     /// The writable capacity in bytes.
@@ -1005,7 +1051,12 @@ impl<P: FrameSource> FrameMut<P> {
         let len = len.min(self.cap);
         let frame = self.frame;
         core::mem::forget(self); // don't run FrameMut's Drop (would recycle)
-        FrameBuf { frame, offset: 0, len, _pool: core::marker::PhantomData }
+        FrameBuf {
+            frame,
+            offset: 0,
+            len,
+            _pool: core::marker::PhantomData,
+        }
     }
 }
 
@@ -1053,7 +1104,10 @@ impl<P: FrameSource> FrameBuf<P> {
     pub fn payload(&self) -> &[u8] {
         // SAFETY: filled via FrameMut; this handle owns [offset, offset+len).
         unsafe {
-            core::slice::from_raw_parts(self.frame.as_ptr().add(self.offset as usize), self.len as usize)
+            core::slice::from_raw_parts(
+                self.frame.as_ptr().add(self.offset as usize),
+                self.len as usize,
+            )
         }
     }
 
@@ -1101,7 +1155,12 @@ impl<P: FrameSource> FrameBuf<P> {
         // exist as a handle, matching descriptor.rs.
         // SAFETY: we hold a live reference, so the count is >= 1 and rising.
         unsafe { P::refcount(self.frame).retain() };
-        Self { frame: self.frame, offset: head_offset, len: at, _pool: core::marker::PhantomData }
+        Self {
+            frame: self.frame,
+            offset: head_offset,
+            len: at,
+            _pool: core::marker::PhantomData,
+        }
     }
 
     /// Keep the first `len` bytes, drop the rest (no refcount change).
@@ -1488,7 +1547,9 @@ fn default_num_cpus() -> u32 {
             return n as u32;
         }
     }
-    std::thread::available_parallelism().map(|n| n.get() as u32).unwrap_or(4)
+    std::thread::available_parallelism()
+        .map(|n| n.get() as u32)
+        .unwrap_or(4)
 }
 
 #[cfg(test)]

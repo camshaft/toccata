@@ -1,0 +1,197 @@
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+name: ci
+
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_NET_RETRY: 10
+  RUSTUP_MAX_RETRIES: 10
+  RUST_BACKTRACE: 1
+  # Pin the nightly toolchain to prevent breakage.
+  # This should be occasionally updated.
+  RUST_NIGHTLY_TOOLCHAIN: nightly-2026-01-14
+
+jobs:
+  env:
+    runs-on: ubuntu-latest
+    outputs:
+      rust-versions: ${{ steps.definitions.outputs.versions }}
+      msrv: ${{ steps.definitions.outputs.msrv }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup override set stable
+
+      - name: Evaluate definitions
+        id: definitions
+        run: |
+          # toccata has no rust-toolchain file, so the MSRV is the workspace's
+          # `rust-version` read straight from cargo metadata (the lowest declared
+          # across the workspace packages).
+          export MSRV=$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '[.packages[].rust_version] | map(select(. != null)) | min')
+          echo "msrv=$MSRV"
+          if [ -z "$MSRV" ] || [ "$MSRV" = "null" ]; then
+            echo "Error: MSRV did not parse correctly"
+            exit 1
+          fi
+          echo "msrv=$MSRV" >> "$GITHUB_OUTPUT"
+          export RAW_VERSIONS="stable $MSRV"
+          export VERSIONS=$(echo $RAW_VERSIONS | jq -scR 'rtrimstr("\n")|split(" ")|.')
+          echo "$VERSIONS"
+          echo "versions=$VERSIONS" >> "$GITHUB_OUTPUT"
+
+  rustfmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install rust toolchain
+        id: toolchain
+        run: |
+          rustup toolchain install ${{ env.RUST_NIGHTLY_TOOLCHAIN }} --profile minimal --component rustfmt
+          rustup override set ${{ env.RUST_NIGHTLY_TOOLCHAIN }}
+
+      - name: Run cargo fmt
+        run: |
+          cargo fmt --all -- --check
+
+  clippy:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      # A large part of the allocator is `#[cfg(target_os = "linux")]` (the rseq
+      # inline-asm fast path, the mmap+mlock reservation). macOS compiles all of
+      # that out, so clippy must run on BOTH to lint both sides of the cfg.
+      matrix:
+        os: [ubuntu-latest, macOS-latest]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install rust toolchain
+        id: toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy
+          rustup override set stable
+
+      - uses: camshaft/rust-cache@v1
+        with:
+          key: ${{ matrix.os }}
+
+      - name: Run cargo clippy
+        run: |
+          cargo clippy --all-features --all-targets --workspace -- -D warnings
+
+  udeps:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install toolchain
+        id: toolchain
+        run: |
+          rustup toolchain install ${{ env.RUST_NIGHTLY_TOOLCHAIN }} --profile minimal
+          rustup override set ${{ env.RUST_NIGHTLY_TOOLCHAIN }}
+
+      - uses: camshaft/rust-cache@v1
+
+      - uses: camshaft/install@v1
+        with:
+          crate: cargo-udeps
+
+      - name: Run cargo udeps
+        run: cargo udeps --workspace --all-targets
+        env:
+          RUSTC_WRAPPER: ""
+
+  features:
+    # toccata is not no_std, so there is no `--no-default-features` no-std leg as
+    # in backbeat. Instead guard the documented feature wiring: the global build
+    # must keep working with toccata-core's default features off (the load-bearing
+    # `default-features = false`), and the optional supervisor/metrics features
+    # must build in every combination.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install toolchain
+        id: toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup override set stable
+
+      - uses: camshaft/rust-cache@v1
+
+      - name: Build feature combinations
+        run: |
+          set -euo pipefail
+          # toccata-core: every feature combination.
+          cargo build -p toccata-core --no-default-features
+          cargo build -p toccata-core --no-default-features --features supervisor
+          cargo build -p toccata-core --no-default-features --features metrics
+          cargo build -p toccata-core --no-default-features --features supervisor,metrics
+          # toccata: minimal global build (core defaults off) and the supervisor build.
+          cargo build -p toccata
+          cargo build -p toccata --features supervisor
+
+  test:
+    runs-on: ${{ matrix.os }}
+    needs: env
+    strategy:
+      fail-fast: false
+      matrix:
+        rust: ${{ fromJson(needs.env.outputs.rust-versions) }}
+        # Linux + macOS. Linux is the real target (rseq / mlock / membarrier);
+        # macOS builds via the portable dev fallback and runs the platform-neutral
+        # tests (the Linux-only integration tests self-`cfg` out there).
+        os: [ubuntu-latest, macOS-latest]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install toolchain
+        id: toolchain
+        run: |
+          rustup toolchain install ${{ matrix.rust }}
+          rustup override set ${{ matrix.rust }}
+
+      - uses: camshaft/rust-cache@v1
+        with:
+          key: ${{ matrix.os }}-${{ matrix.rust }}
+
+      # The `no_syscalls_after_init` gate re-execs itself under strace; without it
+      # the test self-skips, so install it to actually exercise the gate on Linux.
+      - name: Install strace
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y strace
+
+      # The MSRV (`rust-version`) leg builds only the library crates. toccata-bench
+      # is `publish = false` and pulls third-party `-sys` allocators (jemalloc /
+      # mimalloc / snmalloc) whose own MSRVs we don't control, so it must not gate
+      # toccata's MSRV. The stable leg still tests the whole workspace below.
+      - name: Run tests (MSRV — library crates only)
+        if: matrix.rust == needs.env.outputs.msrv
+        run: |
+          # toccata installs a #[global_allocator] that mlocks its pool, so the
+          # Linux integration tests need RLIMIT_MEMLOCK raised above the modest
+          # default. `prlimit` mirrors the production `LimitMEMLOCK=infinity`.
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            sudo prlimit --memlock=unlimited:unlimited --pid $$ || true
+          fi
+          cargo test -p toccata-core -p toccata --all-features
+
+      - name: Run tests (stable — full workspace)
+        if: matrix.rust != needs.env.outputs.msrv
+        run: |
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            sudo prlimit --memlock=unlimited:unlimited --pid $$ || true
+          fi
+          cargo test --workspace --all-features

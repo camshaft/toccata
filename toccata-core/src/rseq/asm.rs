@@ -17,7 +17,10 @@
 //! old kernel without rseq makes registration fail and the slab falls back at
 //! runtime.
 
-#![cfg(all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64")))]
+#![cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 
 use crate::rseq::abi::{self, Rseq, RSEQ_SIG};
 
@@ -107,16 +110,16 @@ pub unsafe fn pop(
         "6:", // ---- post_commit ----
         "str xzr, [{rseq}, #{cs_off}]",
         "mov {status}, #0",
-        "b 100f",
+        "b 8f",
         "90:",                              // empty
         "str xzr, [{rseq}, #{cs_off}]",
         "mov {status}, #1",
-        "b 100f",
+        "b 8f",
         "92:",                              // fallback / seized
         "str xzr, [{rseq}, #{cs_off}]",
         "mov {status}, #2",
         "mov {obj}, xzr",
-        "100:",
+        "8:",
         rseq = in(reg) rseq_ptr,
         base = in(reg) base,
         ncpus = in(reg) num_cpus,
@@ -155,6 +158,7 @@ pub unsafe fn pop(
 /// As [`pop`]. `obj` must be a valid pointer to store.
 #[cfg(target_arch = "aarch64")]
 #[inline]
+#[allow(clippy::too_many_arguments)] // layout is passed positionally to keep the asm shim flat
 pub unsafe fn push(
     base: *mut u8,
     shift: u32,
@@ -215,15 +219,15 @@ pub unsafe fn push(
         "6:",
         "str xzr, [{rseq}, #{cs_off}]",
         "mov {status}, #0",
-        "b 100f",
+        "b 8f",
         "90:",
         "str xzr, [{rseq}, #{cs_off}]",
         "mov {status}, #1",
-        "b 100f",
+        "b 8f",
         "92:",
         "str xzr, [{rseq}, #{cs_off}]",
         "mov {status}, #2",
-        "100:",
+        "8:",
         rseq = in(reg) rseq_ptr,
         base = in(reg) base,
         ncpus = in(reg) num_cpus,
@@ -257,6 +261,10 @@ pub unsafe fn push(
 
 // ---- x86_64 ----
 
+/// As the aarch64 [`pop`]: pop one object pointer from the current CPU's stack.
+///
+/// # Safety
+/// The layout args must describe a live, correctly-sized per-CPU region.
 #[cfg(target_arch = "x86_64")]
 #[inline]
 pub unsafe fn pop(
@@ -317,16 +325,16 @@ pub unsafe fn pop(
         "6:",
         "mov qword ptr [{rseq}+{cs_off}], 0",
         "xor {status:e}, {status:e}",
-        "jmp 100f",
+        "jmp 8f",
         "90:",
         "mov qword ptr [{rseq}+{cs_off}], 0",
         "mov {status}, 1",
-        "jmp 100f",
+        "jmp 8f",
         "92:",
         "mov qword ptr [{rseq}+{cs_off}], 0",
         "mov {status}, 2",
         "xor {obj:e}, {obj:e}",
-        "100:",
+        "8:",
         rseq = in(reg) rseq_ptr,
         base = in(reg) base,
         ncpus = in(reg) num_cpus,
@@ -355,8 +363,13 @@ pub unsafe fn pop(
     }
 }
 
+/// As the aarch64 [`push`]: push one object pointer onto the current CPU's stack.
+///
+/// # Safety
+/// As [`pop`]. `obj` must be a valid pointer to store.
 #[cfg(target_arch = "x86_64")]
 #[inline]
+#[allow(clippy::too_many_arguments)] // layout is passed positionally to keep the asm shim flat
 pub unsafe fn push(
     base: *mut u8,
     shift: u32,
@@ -413,15 +426,15 @@ pub unsafe fn push(
         "6:",
         "mov qword ptr [{rseq}+{cs_off}], 0",
         "xor {status:e}, {status:e}",
-        "jmp 100f",
+        "jmp 8f",
         "90:",
         "mov qword ptr [{rseq}+{cs_off}], 0",
         "mov {status}, 1",
-        "jmp 100f",
+        "jmp 8f",
         "92:",
         "mov qword ptr [{rseq}+{cs_off}], 0",
         "mov {status}, 2",
-        "100:",
+        "8:",
         rseq = in(reg) rseq_ptr,
         base = in(reg) base,
         ncpus = in(reg) num_cpus,

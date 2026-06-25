@@ -2,10 +2,11 @@
 
 //! Phase 1 correctness suite for the single-thread-correct allocator.
 
-use crate::sizeclass::{self};
-use crate::subheap::{OnExhaust, SubHeapBuilder};
-use std::collections::HashSet;
-use std::ptr::NonNull;
+use crate::{
+    sizeclass::{self},
+    subheap::{OnExhaust, SubHeapBuilder},
+};
+use std::{collections::HashSet, ptr::NonNull};
 
 /// A small sub-heap for tests. Budget kept well under the default 8 MiB
 /// `RLIMIT_MEMLOCK` so the reservation succeeds without raising limits. Note the
@@ -48,7 +49,10 @@ fn allocations_are_distinct_and_aligned() {
         let p = sh.alloc_class(class).expect("alloc");
         let addr = p.as_ptr() as usize;
         assert_eq!(addr % crate::sizeclass::MIN_ALIGN, 0, "must be 8-aligned");
-        assert!(seen.insert(addr), "addresses must be distinct while live: {addr:#x}");
+        assert!(
+            seen.insert(addr),
+            "addresses must be distinct while live: {addr:#x}"
+        );
         held.push(p);
     }
     for p in held {
@@ -84,11 +88,8 @@ fn budget_exhaustion_returns_none() {
         .unwrap();
     let class = sizeclass::class_for(4096).unwrap();
     let mut held = Vec::new();
-    loop {
-        match sh.alloc_class(class) {
-            Some(p) => held.push(p),
-            None => break,
-        }
+    while let Some(p) = sh.alloc_class(class) {
+        held.push(p);
         if held.len() > 100_000 {
             panic!("budget never exhausted — accounting broken");
         }
@@ -133,7 +134,9 @@ fn cross_thread_free_returns_to_owner() {
     use std::sync::Arc;
     // Size the slab to the machine so cross-thread frees land on real, distinct
     // home CPUs and exercise the remote-free queue (not the fallback shard).
-    let nproc = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4) as u32;
+    let nproc = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4) as u32;
     let sh = Arc::new(
         SubHeapBuilder::new("xthread", 8 * 1024 * 1024)
             .num_cpus(nproc)
@@ -195,7 +198,9 @@ fn large_and_nondivisor_classes_roundtrip_cross_thread() {
     // `installed.rs` first exercised. Allocate on the main thread, free on others,
     // then reclaim, asserting distinctness (no straddle) and full reuse (no strand).
     use std::sync::Arc;
-    let nproc = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4) as u32;
+    let nproc = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4) as u32;
     // Budget large enough to hold the working set of the biggest class with room
     // to carve fresh + reclaim across rounds.
     let sh = Arc::new(
@@ -222,7 +227,11 @@ fn large_and_nondivisor_classes_roundtrip_cross_thread() {
                     })
                 })
                 .collect();
-            assert_eq!(ptrs.len(), n, "{sz}B: all allocs should succeed within budget");
+            assert_eq!(
+                ptrs.len(),
+                n,
+                "{sz}B: all allocs should succeed within budget"
+            );
             // Distinct live regions, and no two objects overlap given their size.
             let mut sorted = ptrs.clone();
             sorted.sort_unstable();
@@ -255,7 +264,10 @@ fn large_and_nondivisor_classes_roundtrip_cross_thread() {
         // After the rounds, the owner must be able to reclaim the cross-thread
         // frees (no stranding): a fresh batch must still allocate.
         let reclaimed: Vec<_> = (0..24).filter_map(|_| sh.alloc_class(class)).collect();
-        assert!(!reclaimed.is_empty(), "{sz}B: cross-thread frees must be reclaimable");
+        assert!(
+            !reclaimed.is_empty(),
+            "{sz}B: cross-thread frees must be reclaimable"
+        );
         for p in reclaimed {
             unsafe { sh.dealloc_class(p, class) };
         }
@@ -293,14 +305,14 @@ fn large_drift_coalesces_and_caps_carved() {
         carved_after_gen.push(sh.carved_bytes() / span); // in spans
     }
     let last = *carved_after_gen.last().unwrap();
-    let peak_single = (5 + gens - 1) as usize; // largest generation, in spans
-    // This single-buffer-per-generation pattern is a HARDER case than the real
-    // `frag shift` bench (which holds many buffers ≈ a full generation live and
-    // frees them together, building one big coalesced region that every later
-    // same-size generation fits inside — carved there plateaus near 1×). Even
-    // here the high-water must be a SMALL multiple of the largest generation, not
-    // the sum: the freed region is reused (merged + split), only growing when a
-    // request first exceeds the contiguous free region available at that moment.
+    let peak_single = 5 + gens - 1; // largest generation, in spans
+                                    // This single-buffer-per-generation pattern is a HARDER case than the real
+                                    // `frag shift` bench (which holds many buffers ≈ a full generation live and
+                                    // frees them together, building one big coalesced region that every later
+                                    // same-size generation fits inside — carved there plateaus near 1×). Even
+                                    // here the high-water must be a SMALL multiple of the largest generation, not
+                                    // the sum: the freed region is reused (merged + split), only growing when a
+                                    // request first exceeds the contiguous free region available at that moment.
     assert!(
         last <= peak_single * 2,
         "carved {last} spans should stay within ~2× the peak single gen \
@@ -368,7 +380,7 @@ fn crossclass_reclaim_reuses_spans_and_caps_carved() {
     // retired spans, so carved plateaus.
     let span = crate::meta::SPAN_BYTES;
     let sh = test_subheap_bytes(64 * span); // 4 MiB
-    // ~4× apart so each is its own class & carves its own spans (the bench's set).
+                                            // ~4× apart so each is its own class & carves its own spans (the bench's set).
     let classes = [64usize, 256, 1024, 4096, 16384];
     let per_class_bytes = 8 * span; // ~512 KiB live per class step
     let mut carved_after = Vec::new();
@@ -389,11 +401,15 @@ fn crossclass_reclaim_reuses_spans_and_caps_carved() {
         // Verify the sentinel survived (no overlap with the previous class's still
         // -reclaiming spans).
         for p in &held {
-            unsafe { assert_eq!(*p.as_ptr(), (0x40 + step) as u8, "step {step}: object torn"); }
+            unsafe {
+                assert_eq!(*p.as_ptr(), (0x40 + step) as u8, "step {step}: object torn");
+            }
         }
         // Free everything of this class.
         for p in held {
-            unsafe { sh.dealloc_class(p, class); }
+            unsafe {
+                sh.dealloc_class(p, class);
+            }
         }
         // Reclaim the now-empty spans so the NEXT class can reuse them. Cap high so
         // the whole class is swept in this synchronous call (test, not supervisor).
@@ -430,7 +446,9 @@ fn crossclass_reclaim_stale_hint_no_double_handout() {
     // are never torn.
     use std::sync::Arc;
     let span = crate::meta::SPAN_BYTES;
-    let nproc = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4) as u32;
+    let nproc = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4) as u32;
     let sh = Arc::new(
         SubHeapBuilder::new("stalehint", 64 * span)
             .num_cpus(nproc)
@@ -450,8 +468,9 @@ fn crossclass_reclaim_stale_hint_no_double_handout() {
     // free bit) rather than an L2-cached push — so the spans become fully-free *in
     // central*, which is what `reclaim_empty_spans` (and the safety check) require.
     let a_count = (span / osz_a) * 2; // ~2 spans of A
-    let a_ptrs: Vec<usize> =
-        (0..a_count).filter_map(|_| sh.alloc_class(class_a).map(|p| p.as_ptr() as usize)).collect();
+    let a_ptrs: Vec<usize> = (0..a_count)
+        .filter_map(|_| sh.alloc_class(class_a).map(|p| p.as_ptr() as usize))
+        .collect();
     assert!(!a_ptrs.is_empty());
     // Track candidate span S by INDEX (address masking can underflow vs arena base).
     let s_addr = *a_ptrs.iter().min().unwrap();
@@ -471,7 +490,10 @@ fn crossclass_reclaim_stale_hint_no_double_handout() {
 
     // (2) Reclaim: S (and the other now-empty A spans) retag -> LARGE, into the pool.
     let reclaimed = sh.reclaim_empty_spans(usize::MAX);
-    assert!(reclaimed > 0, "no spans reclaimed — A's frees didn't reach central as fully-free");
+    assert!(
+        reclaimed > 0,
+        "no spans reclaimed — A's frees didn't reach central as fully-free"
+    );
 
     // (3) Carve B until it reuses the reclaimed spans (the pool hands lowest-address
     // runs first, so B should land on S's region). Hold them live + sentineled.
@@ -485,16 +507,26 @@ fn crossclass_reclaim_stale_hint_no_double_handout() {
         }
     }
     // Confirm B actually reused S's span (else the test wouldn't exercise the hazard).
-    let b_in_s: Vec<usize> =
-        b_live.iter().filter(|&&(a, _)| sh.test_span_of(a as *const u8) == s_span).map(|&(a, _)| a).collect();
-    assert!(!b_in_s.is_empty(), "B did not reuse the reclaimed span S — test precondition unmet");
+    let b_in_s: Vec<usize> = b_live
+        .iter()
+        .filter(|&&(a, _)| sh.test_span_of(a as *const u8) == s_span)
+        .map(|&(a, _)| a)
+        .collect();
+    assert!(
+        !b_in_s.is_empty(),
+        "B did not reuse the reclaimed span S — test precondition unmet"
+    );
 
     // Free HALF of S's B objects cross-thread (so S has FREE B-slots for the stale-hint
     // scan to hand out) while keeping the other half LIVE (so a bogus A hand-out from
     // S provably collides with a live B object). The freed B slots' bits are set in S's
     // bitmap — exactly what a stale-hint class-A scan would wrongly hand out as A.
-    let b_free: Vec<usize> =
-        b_in_s.iter().enumerate().filter(|(i, _)| i % 2 == 0).map(|(_, &a)| a).collect();
+    let b_free: Vec<usize> = b_in_s
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| i % 2 == 0)
+        .map(|(_, &a)| a)
+        .collect();
     // Remove b_free from b_live (keep the odd-indexed ones live) and free them.
     b_live.retain(|&(a, _)| !b_free.contains(&a));
     {
@@ -531,7 +563,13 @@ fn crossclass_reclaim_stale_hint_no_double_handout() {
     }
     // B's objects must be intact — no A write tore them.
     for &(addr, sentinel) in &b_live {
-        unsafe { assert_eq!(*(addr as *const u8), sentinel, "B object {addr:#x} torn by an A hand-out"); }
+        unsafe {
+            assert_eq!(
+                *(addr as *const u8),
+                sentinel,
+                "B object {addr:#x} torn by an A hand-out"
+            );
+        }
     }
 
     for a in a_new {
@@ -563,11 +601,12 @@ fn crossclass_reclaim_no_double_handout_cross_thread() {
     // A's osz and hands out B's slots as A objects (a cross-class double hand-out).
     // The detector below asserts no address is ever simultaneously live in two
     // classes and no sentinel is ever torn.
-    use std::collections::HashMap;
-    use std::sync::Arc;
+    use std::{collections::HashMap, sync::Arc};
     let span = crate::meta::SPAN_BYTES;
     // Many shards so the spawned freer lands on a different shard than main (M).
-    let nproc = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4) as u32;
+    let nproc = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4) as u32;
     let sh = Arc::new(
         SubHeapBuilder::new("xclass", 64 * span)
             .num_cpus(nproc)
@@ -578,7 +617,7 @@ fn crossclass_reclaim_no_double_handout_cross_thread() {
     // Distinct osz so a B-tiled span handed out as A (or vice versa) tears a sentinel.
     let classes = [64usize, 256, 1024, 4096, 16384];
     let per_step = 6 * span; // whole-span-multiples of live, so spans go fully empty
-    // addr -> (class, sentinel) for everything currently live (across all classes).
+                             // addr -> (class, sentinel) for everything currently live (across all classes).
     let mut live: HashMap<usize, (usize, u8)> = HashMap::new();
 
     for round in 0..40 {
@@ -604,7 +643,9 @@ fn crossclass_reclaim_no_double_handout_cross_thread() {
         // Re-verify every live object's sentinel: a fresh B-carve reusing a reclaimed
         // span that some class still believes it owns would have torn one.
         for (&addr, &(_c, sentinel)) in &live {
-            unsafe { assert_eq!(*(addr as *const u8), sentinel, "tear at {addr:#x}"); }
+            unsafe {
+                assert_eq!(*(addr as *const u8), sentinel, "tear at {addr:#x}");
+            }
         }
         // (2) free this batch on ANOTHER thread (cross-shard → central deposit +
         // reuse_hint write). Free the whole batch so its spans become fully free.
@@ -629,7 +670,9 @@ fn crossclass_reclaim_no_double_handout_cross_thread() {
     }
     // Final: drain + integrity.
     for (&addr, &(_c, sentinel)) in &live {
-        unsafe { assert_eq!(*(addr as *const u8), sentinel, "final tear at {addr:#x}"); }
+        unsafe {
+            assert_eq!(*(addr as *const u8), sentinel, "final tear at {addr:#x}");
+        }
     }
     for (addr, (lclass, _)) in live {
         unsafe { sh.dealloc_class(NonNull::new(addr as *mut u8).unwrap(), lclass) };
@@ -676,7 +719,11 @@ fn dealloc_by_ptr_recovers_class() {
     for &s in &sizes {
         let class = sizeclass::class_for(s).unwrap();
         let p = sh.alloc_class(class).unwrap();
-        assert_eq!(sh.class_of(p), Some(class), "span table must know the class for {s}B");
+        assert_eq!(
+            sh.class_of(p),
+            Some(class),
+            "span table must know the class for {s}B"
+        );
         assert!(sh.owns(p), "sub-heap must own its own pointer");
         held.push(p);
     }
@@ -684,7 +731,10 @@ fn dealloc_by_ptr_recovers_class() {
     assert_eq!(before, sizes.len() as u64);
     for p in held {
         // Free by pointer alone — no class passed.
-        assert!(unsafe { sh.dealloc_by_ptr(p) }, "dealloc_by_ptr should succeed for owned ptr");
+        assert!(
+            unsafe { sh.dealloc_by_ptr(p) },
+            "dealloc_by_ptr should succeed for owned ptr"
+        );
     }
     assert_eq!(sh.live_objects(), 0);
     assert_eq!(sh.live_bytes(), 0);
@@ -724,7 +774,8 @@ fn over_memlock_budget_fails_loudly() {
         Err(e) => e.to_string(),
         Ok(_) => panic!("expected reservation over RLIMIT_MEMLOCK to fail"),
     };
-    assert!(msg.contains("RLIMIT_MEMLOCK"), "error must mention RLIMIT_MEMLOCK: {msg}");
+    assert!(
+        msg.contains("RLIMIT_MEMLOCK"),
+        "error must mention RLIMIT_MEMLOCK: {msg}"
+    );
 }
-
-

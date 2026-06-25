@@ -43,8 +43,7 @@
 //! head is `H-1 - tail_count + 1`). Each side merges at most once (we always
 //! coalesce on insert, so no two free runs are ever adjacent), bounding the work.
 
-use crate::meta::NO_SPAN;
-use crate::SysBoxSlice;
+use crate::{meta::NO_SPAN, SysBoxSlice};
 
 /// A segregated-fit, address-coalescing index of free span-runs over
 /// `[0, num_spans)`. Single-threaded; the caller holds the large-allocator lock.
@@ -334,7 +333,12 @@ mod tests {
                     assert!(head + n <= num_spans, "run out of bounds");
                     for (&lh, &lc) in &live {
                         let overlap = head < lh + lc && lh < head + n;
-                        assert!(!overlap, "double hand-out: [{head},{}) vs [{lh},{})", head + n, lh + lc);
+                        assert!(
+                            !overlap,
+                            "double hand-out: [{head},{}) vs [{lh},{})",
+                            head + n,
+                            lh + lc
+                        );
                     }
                     live.insert(head, n);
                 }
@@ -353,6 +357,10 @@ mod tests {
             p.free(head, count);
         }
         // The whole arena is free again -> a single num_spans run is allocatable.
-        assert_eq!(p.alloc(num_spans), Some(0), "full coalesce back to one run failed (live was {live_total})");
+        assert_eq!(
+            p.alloc(num_spans),
+            Some(0),
+            "full coalesce back to one run failed (live was {live_total})"
+        );
     }
 }

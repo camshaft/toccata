@@ -28,7 +28,11 @@ pub enum ReserveError {
     /// message includes the actionable fix. Only returned when `lock` was
     /// [`Require::Required`]; a [`Require::BestEffort`] lock failure proceeds
     /// unlocked instead (observable via [`Reservation::is_locked`]).
-    Mlock { source: std::io::Error, limit: u64, requested: usize },
+    Mlock {
+        source: std::io::Error,
+        limit: u64,
+        requested: usize,
+    },
     /// `getrlimit(RLIMIT_MEMLOCK)` says the lock cannot possibly succeed; we
     /// pre-flight this to fail with a clear message before even mapping. As
     /// `Mlock`, only a `Required` lock surfaces this.
@@ -42,7 +46,11 @@ impl std::fmt::Display for ReserveError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ReserveError::Mmap(e) => write!(f, "toccata reservation mmap failed: {e}"),
-            ReserveError::Mlock { source, limit, requested } => write!(
+            ReserveError::Mlock {
+                source,
+                limit,
+                requested,
+            } => write!(
                 f,
                 "toccata reservation mlock2 failed: {source}. Requested {requested} bytes but \
                  RLIMIT_MEMLOCK is {limit}. Raise it (ulimit -l / LimitMEMLOCK=infinity in the \
@@ -279,11 +287,17 @@ impl Reservation {
         let limit = memlock_limit();
         if !opts.lock.is_off() && (limit as u128) < (map_len as u128) && limit != u64::MAX {
             if opts.lock.is_required() {
-                return Err(ReserveError::RlimitTooLow { limit, requested: map_len });
+                return Err(ReserveError::RlimitTooLow {
+                    limit,
+                    requested: map_len,
+                });
             }
             // BestEffort lock that cannot succeed: skip it loudly, proceed unlocked.
-            warn_degraded(b"toccata: reservation lock requested (best-effort) but \
-                RLIMIT_MEMLOCK too low; proceeding UNLOCKED, never-stall forfeited [bytes=", map_len);
+            warn_degraded(
+                b"toccata: reservation lock requested (best-effort) but \
+                RLIMIT_MEMLOCK too low; proceeding UNLOCKED, never-stall forfeited [bytes=",
+                map_len,
+            );
         }
 
         // One mmap. We pre-fault every page so there are no first-touch faults later
@@ -302,8 +316,11 @@ impl Reservation {
         if base == libc::MAP_FAILED && hp_flags != 0 && !opts.huge_pages.is_required() {
             // BestEffort huge pages: the HUGETLB mmap failed (no pool / too
             // fragmented). Retry with base pages at the un-rounded length.
-            warn_degraded(b"toccata: huge pages requested (best-effort) but mmap \
-                failed; falling back to base pages [bytes=", opts.len);
+            warn_degraded(
+                b"toccata: huge pages requested (best-effort) but mmap \
+                failed; falling back to base pages [bytes=",
+                opts.len,
+            );
             hp_size = None;
             map_len = opts.len;
             // base-page retry: defer populate to the post-THP-hint mlock as above.
@@ -326,7 +343,11 @@ impl Reservation {
         // disabled kernel) just leaves base pages — never an error, never a stall.
         if thp {
             unsafe {
-                libc::madvise(base.as_ptr() as *mut libc::c_void, map_len, libc::MADV_HUGEPAGE);
+                libc::madvise(
+                    base.as_ptr() as *mut libc::c_void,
+                    map_len,
+                    libc::MADV_HUGEPAGE,
+                );
             }
             // The mmap skipped MAP_POPULATE so this madvise could precede fault-in.
             // If we won't mlock (lock off), populate now via MADV_WILLNEED so the
@@ -334,7 +355,11 @@ impl Reservation {
             // mlock2 below faults the whole range in (as huge pages).
             if opts.populate && opts.lock.is_off() {
                 unsafe {
-                    libc::madvise(base.as_ptr() as *mut libc::c_void, map_len, libc::MADV_WILLNEED);
+                    libc::madvise(
+                        base.as_ptr() as *mut libc::c_void,
+                        map_len,
+                        libc::MADV_WILLNEED,
+                    );
                 }
             }
         }
@@ -351,22 +376,38 @@ impl Reservation {
                 let source = std::io::Error::last_os_error();
                 // Best-effort cleanup of the mapping before returning the error.
                 unsafe { libc::munmap(base.as_ptr() as *mut libc::c_void, map_len) };
-                return Err(ReserveError::Mlock { source, limit, requested: map_len });
+                return Err(ReserveError::Mlock {
+                    source,
+                    limit,
+                    requested: map_len,
+                });
             } else {
                 // BestEffort lock failed: keep the (usable, unlocked) mapping.
-                warn_degraded(b"toccata: reservation mlock2 failed (best-effort); \
-                    proceeding UNLOCKED, never-stall forfeited [bytes=", map_len);
+                warn_degraded(
+                    b"toccata: reservation mlock2 failed (best-effort); \
+                    proceeding UNLOCKED, never-stall forfeited [bytes=",
+                    map_len,
+                );
             }
         }
 
         // Keep core dumps sane: don't dump the (potentially huge) locked pool.
         if opts.dontdump {
             unsafe {
-                libc::madvise(base.as_ptr() as *mut libc::c_void, map_len, libc::MADV_DONTDUMP)
+                libc::madvise(
+                    base.as_ptr() as *mut libc::c_void,
+                    map_len,
+                    libc::MADV_DONTDUMP,
+                )
             };
         }
 
-        Ok(Self { base, len: map_len, locked, huge_page_size: hp_size })
+        Ok(Self {
+            base,
+            len: map_len,
+            locked,
+            huge_page_size: hp_size,
+        })
     }
 
     /// Non-Linux dev stub: a plain heap-backed region (no locking, no huge pages;
@@ -378,14 +419,24 @@ impl Reservation {
     pub fn reserve_with(opts: ReserveOpts) -> Result<Self, ReserveError> {
         assert!(opts.len > 0);
         if opts.huge_pages.is_required() {
-            return Err(ReserveError::InvalidConfig("huge pages are only supported on Linux"));
+            return Err(ReserveError::InvalidConfig(
+                "huge pages are only supported on Linux",
+            ));
         }
         let layout = std::alloc::Layout::from_size_align(opts.len, 4096).unwrap();
         let p = unsafe { std::alloc::alloc_zeroed(layout) };
         let base = NonNull::new(p).ok_or_else(|| {
-            ReserveError::Mmap(std::io::Error::new(std::io::ErrorKind::OutOfMemory, "alloc"))
+            ReserveError::Mmap(std::io::Error::new(
+                std::io::ErrorKind::OutOfMemory,
+                "alloc",
+            ))
         })?;
-        Ok(Self { base, len: opts.len, locked: false, huge_page_size: None })
+        Ok(Self {
+            base,
+            len: opts.len,
+            locked: false,
+            huge_page_size: None,
+        })
     }
 
     #[inline]
@@ -428,7 +479,14 @@ impl Reservation {
 #[cfg(target_os = "linux")]
 #[inline]
 unsafe fn mmap_region(len: usize, flags: i32) -> *mut libc::c_void {
-    libc::mmap(core::ptr::null_mut(), len, libc::PROT_READ | libc::PROT_WRITE, flags, -1, 0)
+    libc::mmap(
+        core::ptr::null_mut(),
+        len,
+        libc::PROT_READ | libc::PROT_WRITE,
+        flags,
+        -1,
+        0,
+    )
 }
 
 /// Resolve a [`HugePages`] request into `(extra mmap flags, page size in bytes)`.
@@ -449,7 +507,8 @@ fn resolve_huge_pages(h: HugePages) -> Result<(i32, usize), &'static str> {
     };
     // Encode the size in the MAP_HUGE_* bits so we map exactly this page size.
     let shift = size.trailing_zeros() as i32;
-    let flags = libc::MAP_HUGETLB | ((shift & ((1 << libc::MAP_HUGE_SHIFT) - 1)) << libc::MAP_HUGE_SHIFT);
+    let flags =
+        libc::MAP_HUGETLB | ((shift & ((1 << libc::MAP_HUGE_SHIFT) - 1)) << libc::MAP_HUGE_SHIFT);
     Ok((flags, size))
 }
 
@@ -508,7 +567,10 @@ impl Drop for Reservation {
 /// Current `RLIMIT_MEMLOCK` soft limit in bytes; `u64::MAX` means unlimited.
 #[cfg(target_os = "linux")]
 pub fn memlock_limit() -> u64 {
-    let mut rl = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+    let mut rl = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
     let rc = unsafe { libc::getrlimit(libc::RLIMIT_MEMLOCK, &mut rl) };
     if rc != 0 {
         return 0;
@@ -516,7 +578,7 @@ pub fn memlock_limit() -> u64 {
     if rl.rlim_cur == libc::RLIM_INFINITY {
         u64::MAX
     } else {
-        rl.rlim_cur as u64
+        rl.rlim_cur
     }
 }
 

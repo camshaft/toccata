@@ -39,11 +39,12 @@
 //! allocations, over-aligned spill) to `System`. One branch, no separate
 //! bootstrap state.
 
+use core::{
+    alloc::{GlobalAlloc, Layout},
+    sync::atomic::{AtomicPtr, AtomicUsize, Ordering},
+};
+use std::{alloc::System, ptr::NonNull};
 use toccata_core::{sizeclass, OnExhaust, SubHeap, SubHeapBuilder, ThreadCache};
-use core::alloc::{GlobalAlloc, Layout};
-use core::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
-use std::alloc::System;
-use std::ptr::NonNull;
 
 /// The configured main sub-heap, published once by `configure()`. Null until
 /// then (pre-configure allocations go to [`System`]).
@@ -127,7 +128,12 @@ pub fn configure_with(builder: SubHeapBuilder) {
         // Only the first configure wins; a racing/second one leaks its sub-heap
         // (negligible; configure runs once at init).
         if MAIN
-            .compare_exchange(core::ptr::null_mut(), leaked_ptr, Ordering::AcqRel, Ordering::Acquire)
+            .compare_exchange(
+                core::ptr::null_mut(),
+                leaked_ptr,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
             .is_ok()
         {
             // Publish the pool range for dealloc routing. The pool is already
@@ -159,7 +165,10 @@ fn maybe_start_supervisor(sh: &'static SubHeap) {
         return;
     }
     let mut b = Supervisor::builder().manage(sh);
-    if let Some(ms) = std::env::var("TOCCATA_SUPERVISOR_MS").ok().and_then(|s| s.parse::<u64>().ok()) {
+    if let Some(ms) = std::env::var("TOCCATA_SUPERVISOR_MS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+    {
         b = b.interval(core::time::Duration::from_millis(ms));
     }
     // Leak the handle: dropping it would stop+join the thread, but the supervisor
@@ -259,7 +268,10 @@ struct Tls {
 
 impl Tls {
     fn new() -> Self {
-        Self { heap: None, cache: ThreadCache::new() }
+        Self {
+            heap: None,
+            cache: ThreadCache::new(),
+        }
     }
 
     /// Resolve (and cache) this thread's sub-heap. `None` if not configured yet.
@@ -442,7 +454,9 @@ unsafe impl GlobalAlloc for Toccata {
 
         // Over-aligned / large: cold path (no magazine).
         with_tls(|t| {
-            let Some(sub) = t.heap() else { return System.alloc(layout) };
+            let Some(sub) = t.heap() else {
+                return System.alloc(layout);
+            };
             let ptr = if need > sizeclass::MAX_SMALL {
                 if align > toccata_core::meta::SPAN_BYTES {
                     oom_backpressure(layout, "alignment exceeds span size");

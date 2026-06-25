@@ -4,8 +4,10 @@
 //! is correct on every platform); the rseq fast path is validated separately on
 //! hardware.
 
-use crate::rseq::abi;
-use crate::rseq::slab::{ClassLoc, CpuStack, Fast, Header, SlabLayout};
+use crate::rseq::{
+    abi,
+    slab::{ClassLoc, CpuStack, Fast, Header, SlabLayout},
+};
 use std::ptr::NonNull;
 
 /// Build a tiny single-class slab in a heap allocation and return (layout,
@@ -17,7 +19,7 @@ fn make_slab(num_cpus: u32, capacity: u32) -> (SlabLayout, Vec<u8>, &'static [Cl
     let slots_off: u32 = 16; // 8-aligned after the lock
     let stride_bytes = slots_off as usize + (capacity as usize) * 8;
     // round stride up to a power of two for the shift-based indexing
-    let shift = (usize::BITS - (stride_bytes - 1).leading_zeros()) as u32;
+    let shift = usize::BITS - (stride_bytes - 1).leading_zeros();
     let stride = 1usize << shift;
 
     let mut backing = vec![0u8; stride * num_cpus as usize];
@@ -33,8 +35,14 @@ fn make_slab(num_cpus: u32, capacity: u32) -> (SlabLayout, Vec<u8>, &'static [Cl
         }
     }
 
-    let classes: &'static [ClassLoc] =
-        Box::leak(vec![ClassLoc { header_off, slots_off, lock_off }].into_boxed_slice());
+    let classes: &'static [ClassLoc] = Box::leak(
+        vec![ClassLoc {
+            header_off,
+            slots_off,
+            lock_off,
+        }]
+        .into_boxed_slice(),
+    );
     let layout = unsafe { SlabLayout::new(base, num_cpus, shift, classes) };
     (layout, backing, classes)
 }
@@ -45,8 +53,9 @@ fn push_then_pop_roundtrip_lifo() {
     let stack = CpuStack::current(&layout);
 
     // Push three distinct fake pointers.
-    let ptrs: Vec<NonNull<u8>> =
-        (1..=3u8).map(|i| NonNull::new(i as usize as *mut u8).unwrap()).collect();
+    let ptrs: Vec<NonNull<u8>> = (1..=3u8)
+        .map(|i| NonNull::new(i as usize as *mut u8).unwrap())
+        .collect();
     for p in &ptrs {
         assert!(matches!(stack.push_locked(0, *p), Fast::Ok(())));
     }
@@ -84,7 +93,9 @@ fn current_cpu_is_in_range_or_none() {
     // On Linux with rseq this is Some(cpu < nproc); elsewhere None. Either way
     // it must never be an absurd value.
     if let Some(cpu) = abi::current_cpu() {
-        let n = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1) as u32;
+        let n = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1) as u32;
         // cpu can momentarily exceed reported parallelism on some hosts, but
         // should be far below an absurd ceiling.
         assert!(cpu < 4096, "cpu id {cpu} implausible (n={n})");
@@ -93,8 +104,10 @@ fn current_cpu_is_in_range_or_none() {
 
 #[test]
 fn concurrent_push_pop_no_corruption() {
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::Arc;
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
 
     // Many threads hammering a shared slab; the per-(cpu,class) lock must keep
     // it corruption-free regardless of which CPU each thread lands on.
@@ -133,7 +146,6 @@ fn concurrent_push_pop_no_corruption() {
     stop.store(true, Ordering::Relaxed);
     let total: u64 = workers.into_iter().map(|w| w.join().unwrap()).sum();
     let _ = total;
-    assert!(true);
 }
 
 /// Stress the dispatch `pop`/`push` (the RSEQ fast path on Linux x86_64/aarch64,
@@ -143,10 +155,14 @@ fn concurrent_push_pop_no_corruption() {
 /// not lose or duplicate objects (checked by a conservation count).
 #[test]
 fn rseq_dispatch_stress_no_corruption() {
-    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-    use std::sync::Arc;
+    use std::sync::{
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc,
+    };
 
-    let nproc = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4) as u32;
+    let nproc = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4) as u32;
     // Slab sized to the machine so rseq's real CPU index is always in range.
     let (layout, _backing, _classes) = make_slab(nproc + 1, 256);
     let layout = Arc::new(layout);
@@ -170,7 +186,8 @@ fn rseq_dispatch_stress_no_corruption() {
     // thread)". Pop must find it clear (in-slab) and set it; push clears it. A
     // double-pop (duplication) or popping an un-pushed object trips an assert —
     // this catches any tear/duplication the lockless rseq path could cause.
-    let occ: Arc<Vec<AtomicU64>> = Arc::new((0..(seed / 64 + 1)).map(|_| AtomicU64::new(0)).collect());
+    let occ: Arc<Vec<AtomicU64>> =
+        Arc::new((0..(seed / 64 + 1)).map(|_| AtomicU64::new(0)).collect());
     let popped_total = Arc::new(AtomicU64::new(0));
     let workers: Vec<_> = (0..nworkers)
         .map(|w| {
@@ -205,7 +222,11 @@ fn rseq_dispatch_stress_no_corruption() {
                             let word = &occ[i / 64];
                             let bit = 1u64 << (i % 64);
                             let prev = word.fetch_or(bit, Ordering::AcqRel);
-                            assert_eq!(prev & bit, 0, "DUPLICATION: object {i} popped while already held");
+                            assert_eq!(
+                                prev & bit,
+                                0,
+                                "DUPLICATION: object {i} popped while already held"
+                            );
                             held.push(p);
                             pops += 1;
                         }
@@ -242,6 +263,9 @@ fn rseq_dispatch_stress_no_corruption() {
         w.join().unwrap();
     }
     let pops = popped_total.load(Ordering::Relaxed);
-    assert!(pops > 0, "no successful pops — rseq/locked path made no progress");
+    assert!(
+        pops > 0,
+        "no successful pops — rseq/locked path made no progress"
+    );
     eprintln!("rseq_dispatch_stress: {pops} pops across {nworkers} threads, no corruption");
 }

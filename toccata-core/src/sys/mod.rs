@@ -30,8 +30,10 @@ pub use reserve::{
 };
 
 use allocator_api2::alloc::{AllocError, Allocator};
-use core::alloc::{GlobalAlloc, Layout};
-use core::ptr::NonNull;
+use core::{
+    alloc::{GlobalAlloc, Layout},
+    ptr::NonNull,
+};
 
 /// An `allocator-api2::Allocator` that delegates to the process's *system*
 /// allocator (`std::alloc::System` = libc `malloc`/`free`), bypassing whatever

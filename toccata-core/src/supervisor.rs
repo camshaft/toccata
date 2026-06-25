@@ -23,9 +23,13 @@
 //! (uncontended in steady state) and issues membarrier IPIs (rate-limited).
 
 use crate::SubHeap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
-use std::time::Duration;
+use std::{
+    sync::{
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
 
 /// A registered sub-heap the supervisor manages. Held by `&'static` reference
 /// because sub-heaps live for the process (registry-owned / leaked).
@@ -70,7 +74,10 @@ impl SupervisorBuilder {
         // stranded; 10ms tracks it while keeping the sweep's CPU cost negligible
         // (each sweep is a bounded walk of the active lists, lock dropped between
         // batches). Override via `interval` / `TOCCATA_SUPERVISOR_MS`.
-        Self { subheaps: Vec::new(), interval: Duration::from_millis(10) }
+        Self {
+            subheaps: Vec::new(),
+            interval: Duration::from_millis(10),
+        }
     }
 
     /// Register a sub-heap to be swept for stranded remote frees.
@@ -126,7 +133,9 @@ impl SupervisorBuilder {
                             reclaimed += sh.reclaim_empty_spans(RECLAIM_CAP_PER_CELL) as u64;
                         }
                         stats.sweeps.fetch_add(1, Ordering::Relaxed);
-                        stats.reclaimed_objects.fetch_add(reclaimed, Ordering::Relaxed);
+                        stats
+                            .reclaimed_objects
+                            .fetch_add(reclaimed, Ordering::Relaxed);
                         // Reclaimed something -> stay hot; nothing -> relax to idle.
                         nap = if reclaimed > 0 { fast } else { idle };
                         std::thread::sleep(nap);
@@ -141,7 +150,12 @@ impl SupervisorBuilder {
                 .expect("spawn supervisor thread")
         };
 
-        Supervisor { stop, stats, handle: Some(handle), caps }
+        Supervisor {
+            stop,
+            stats,
+            handle: Some(handle),
+            caps,
+        }
     }
 }
 
@@ -239,7 +253,9 @@ mod tests {
 
     #[test]
     fn supervisor_reclaims_stranded_remote_frees() {
-        let nproc = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4) as u32;
+        let nproc = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4) as u32;
         let sh: &'static SubHeap = Box::leak(Box::new(
             SubHeapBuilder::new("sup", 8 * 1024 * 1024)
                 .num_cpus(nproc)
@@ -249,13 +265,17 @@ mod tests {
         ));
         let class = sizeclass::class_for(256).unwrap();
 
-        let sup = Supervisor::builder().manage(sh).interval(Duration::from_millis(5)).spawn();
+        let sup = Supervisor::builder()
+            .manage(sh)
+            .interval(Duration::from_millis(5))
+            .spawn();
 
         // Allocate here, free on another thread (queues to home CPUs), then let
         // the supervisor sweep — afterward the memory must be reusable.
         for _ in 0..10 {
-            let ptrs: Vec<usize> =
-                (0..400).filter_map(|_| sh.alloc_class(class).map(|p| p.as_ptr() as usize)).collect();
+            let ptrs: Vec<usize> = (0..400)
+                .filter_map(|_| sh.alloc_class(class).map(|p| p.as_ptr() as usize))
+                .collect();
             let h = std::thread::spawn(move || {
                 for a in ptrs {
                     unsafe { sh.dealloc_by_ptr(NonNull::new(a as *mut u8).unwrap()) };
@@ -266,7 +286,10 @@ mod tests {
         }
 
         // The supervisor should have run sweeps and reclaimed objects.
-        assert!(sup.stats().sweeps.load(Ordering::Relaxed) > 0, "supervisor never swept");
+        assert!(
+            sup.stats().sweeps.load(Ordering::Relaxed) > 0,
+            "supervisor never swept"
+        );
         // Memory is reusable (allocate a fresh batch).
         let v: Vec<_> = (0..400).filter_map(|_| sh.alloc_class(class)).collect();
         assert!(!v.is_empty());
@@ -282,7 +305,9 @@ mod tests {
         // fully-free, the reclaim trigger), let the supervisor sweep, then allocate
         // class B and assert carved did not climb by a whole second class-worth.
         let span = crate::meta::SPAN_BYTES;
-        let nproc = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4) as u32;
+        let nproc = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4) as u32;
         let sh: &'static SubHeap = Box::leak(Box::new(
             SubHeapBuilder::new("sup_xclass", 64 * span)
                 .num_cpus(nproc)
@@ -295,12 +320,16 @@ mod tests {
         let osz_a = sizeclass::size_of_class(class_a);
         let osz_b = sizeclass::size_of_class(class_b);
 
-        let sup = Supervisor::builder().manage(sh).interval(Duration::from_millis(2)).spawn();
+        let sup = Supervisor::builder()
+            .manage(sh)
+            .interval(Duration::from_millis(2))
+            .spawn();
 
         // Allocate ~6 spans of A, free them all on another thread.
         let a_count = (span / osz_a) * 6;
-        let a: Vec<usize> =
-            (0..a_count).filter_map(|_| sh.alloc_class(class_a).map(|p| p.as_ptr() as usize)).collect();
+        let a: Vec<usize> = (0..a_count)
+            .filter_map(|_| sh.alloc_class(class_a).map(|p| p.as_ptr() as usize))
+            .collect();
         {
             let a2 = a.clone();
             std::thread::spawn(move || {
@@ -329,11 +358,13 @@ mod tests {
         // carved must NOT grow by a whole ~6-span class-worth.
         let b_count = (span / osz_b) * 6;
         let b: Vec<usize> = (0..b_count)
-            .filter_map(|_| sh.alloc_class(class_b).map(|p| {
-                // Write the whole object — a reused-but-not-retagged span would tear.
-                unsafe { std::ptr::write_bytes(p.as_ptr(), 0x5B, osz_b) };
-                p.as_ptr() as usize
-            }))
+            .filter_map(|_| {
+                sh.alloc_class(class_b).map(|p| {
+                    // Write the whole object — a reused-but-not-retagged span would tear.
+                    unsafe { std::ptr::write_bytes(p.as_ptr(), 0x5B, osz_b) };
+                    p.as_ptr() as usize
+                })
+            })
             .collect();
         assert!(!b.is_empty());
         let carved_after_b = sh.carved_bytes();
@@ -342,7 +373,8 @@ mod tests {
         assert!(
             carved_after_b < carved_after_a + 6 * span,
             "carved climbed a full class-worth ({} -> {} spans); reclaim not reused",
-            carved_after_a / span, carved_after_b / span
+            carved_after_a / span,
+            carved_after_b / span
         );
         // Integrity: every B object intact.
         for &p in &b {
@@ -356,7 +388,9 @@ mod tests {
 
     #[test]
     fn seize_and_rebalance_capacity() {
-        let nproc = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4) as u32;
+        let nproc = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4) as u32;
         let sh: &'static SubHeap = Box::leak(Box::new(
             SubHeapBuilder::new("seize", 8 * 1024 * 1024)
                 .num_cpus(nproc)
@@ -404,7 +438,9 @@ mod tests {
     fn seize_under_concurrent_writers_is_safe() {
         // The real test: seize a CPU while many threads hammer alloc/free. The
         // seize must never corrupt the slab and writers must make progress.
-        let nproc = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4) as u32;
+        let nproc = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4) as u32;
         let sh: &'static SubHeap = Box::leak(Box::new(
             SubHeapBuilder::new("seize_race", 16 * 1024 * 1024)
                 .num_cpus(nproc)

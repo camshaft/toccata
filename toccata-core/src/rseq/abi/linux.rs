@@ -26,9 +26,11 @@ impl RseqStorage {
     /// fast path bails to the lock-free global fallback. The `Rseq` box uses the
     /// SYSTEM allocator, never toccata (this runs inside the allocator).
     fn register() -> Self {
-        let mut storage =
-            RseqStorage { slot: crate::sys_box(Rseq::zeroed()), registered: false };
-        let ptr = (&raw mut *storage.slot) as *mut Rseq;
+        let mut storage = RseqStorage {
+            slot: crate::sys_box(Rseq::zeroed()),
+            registered: false,
+        };
+        let ptr = &raw mut *storage.slot;
         match sys_rseq(ptr, 0) {
             Ok(()) => storage.registered = true,
             Err(_) => unsafe { (*ptr).cpu_id_start = CPU_UNREGISTERED },
@@ -70,7 +72,9 @@ pub fn rseq() -> NonNull<Rseq> {
     let off = RSEQ_OFFSET.load(Ordering::Relaxed);
     if off != i64::MIN && off != i64::MAX {
         // Common path: glibc owns rseq; compute the area directly. No alloc.
-        let p = thread_pointer().wrapping_offset(off as isize).cast::<Rseq>();
+        let p = thread_pointer()
+            .wrapping_offset(off as isize)
+            .cast::<Rseq>();
         // SAFETY: glibc guarantees a registered rseq area at this offset for
         // every thread once __rseq_offset is published.
         return unsafe { NonNull::new_unchecked(p) };
@@ -118,7 +122,9 @@ fn dlsym(symbol: &std::ffi::CStr) -> std::io::Result<*mut core::ffi::c_void> {
         let _ = libc::dlerror();
         let addr = libc::dlsym(libc::RTLD_DEFAULT, symbol.as_ptr());
         if let Some(err) = NonNull::new(libc::dlerror()) {
-            let msg = std::ffi::CStr::from_ptr(err.as_ptr()).to_string_lossy().into_owned();
+            let msg = std::ffi::CStr::from_ptr(err.as_ptr())
+                .to_string_lossy()
+                .into_owned();
             return Err(std::io::Error::new(std::io::ErrorKind::NotFound, msg));
         }
         Ok(addr)
@@ -139,7 +145,13 @@ fn thread_pointer() -> *mut core::ffi::c_void {
 
 fn sys_rseq(ptr: *mut Rseq, flags: i32) -> std::io::Result<()> {
     let ret = unsafe {
-        libc::syscall(libc::SYS_rseq, ptr, core::mem::size_of::<Rseq>() as u32, flags, RSEQ_SIG)
+        libc::syscall(
+            libc::SYS_rseq,
+            ptr,
+            core::mem::size_of::<Rseq>() as u32,
+            flags,
+            RSEQ_SIG,
+        )
     };
     if ret != 0 {
         return Err(std::io::Error::last_os_error());

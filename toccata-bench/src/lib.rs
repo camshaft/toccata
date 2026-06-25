@@ -9,24 +9,22 @@
 //! once.
 //!
 //! CLI (forwarded by every shim): `<bin> <workload> [args...]`
-//! * `throughput`            — single-thread, multi-thread, producer/consumer, and
-//!                             alloc-latency-distribution micro-suite.
-//! * `latency-tail [secs] [churn_mib]`
-//!                           — a latency-critical "networking" thread vs. RSS
-//!                             pressure from background churners; reports the tail
-//!                             and the >1ms/>10ms/>100ms stall counts.
-//! * `micro [iters]`         — a tight fixed-size alloc/free loop for `perf`.
+//! * `throughput` — single-thread, multi-thread, producer/consumer, and
+//!   alloc-latency-distribution micro-suite.
+//! * `latency-tail [secs] [churn_mib]` — a latency-critical "networking" thread
+//!   vs. RSS pressure from background churners; reports the tail and the
+//!   >1ms/>10ms/>100ms stall counts.
+//! * `micro [iters]` — a tight fixed-size alloc/free loop for `perf`.
 //! * `frag <mode> [args...]` — fragmentation / budget-stranding: reports
-//!                             footprint/live (the "frag factor"). toccata's
-//!                             footprint is its arena carved-high-water (RSS is
-//!                             pinned by the mlock'd budget); the others use
-//!                             process RSS. Modes:
-//!                             * `shift`  — large-object size drift (adversarial).
-//!                             * `match`  — stable large sizes (control).
-//!                             * `crossclass` — small-object cross-size-class
-//!                               stranding (free one class, allocate another).
-//!                             * `mixed`  — seeded steady-state churn over a
-//!                               skewed small+large size mix (realistic traffic).
+//!   footprint/live (the "frag factor"). toccata's footprint is its arena
+//!   carved-high-water (RSS is pinned by the mlock'd budget); the others use
+//!   process RSS. Modes:
+//!   * `shift` — large-object size drift (adversarial).
+//!   * `match` — stable large sizes (control).
+//!   * `crossclass` — small-object cross-size-class stranding (free one class,
+//!     allocate another).
+//!   * `mixed` — seeded steady-state churn over a skewed small+large size mix
+//!     (realistic traffic).
 //!
 //! Defaults run all of `throughput` when no workload is given.
 
@@ -43,8 +41,10 @@ pub fn run(allocator: &str) {
         "single" => single(allocator),
         "multi" => multi(allocator, &rest),
         "mpsc" => {
-            let reps =
-                std::env::var("TOCCATA_BENCH_REPS").ok().and_then(|s| s.parse().ok()).unwrap_or(7);
+            let reps = std::env::var("TOCCATA_BENCH_REPS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(7);
             let pairs = rest.first().and_then(|s| s.parse().ok()).unwrap_or(8);
             let mut s = Vec::with_capacity(reps);
             for _ in 0..reps {
@@ -70,12 +70,15 @@ pub fn run(allocator: &str) {
     }
 }
 
-/// Isolated single-thread `churn`, repeated for a stable median — a clean profiling
-/// + attribution target (the `throughput` suite interleaves four sub-benches, which
-/// pollutes a `perf record`).
+/// Isolated single-thread `churn`, repeated for a stable median — a clean
+/// profiling + attribution target (the `throughput` suite interleaves four
+/// sub-benches, which pollutes a `perf record`).
 fn single(allocator: &str) {
     let rounds = 5_000_000;
-    let reps = std::env::var("TOCCATA_BENCH_REPS").ok().and_then(|s| s.parse().ok()).unwrap_or(7);
+    let reps = std::env::var("TOCCATA_BENCH_REPS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(7);
     let _ = churn(100_000, 256); // warm up
     let mut samples = Vec::with_capacity(reps);
     let mut cs = 0u64;
@@ -93,16 +96,25 @@ fn single(allocator: &str) {
 
 /// Isolated multi-thread `churn`, repeated for a stable median.
 fn multi(allocator: &str, args: &[String]) {
-    let nproc = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
-    let threads: usize = args.first().and_then(|s| s.parse().ok()).unwrap_or(nproc.min(16));
+    let nproc = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+    let threads: usize = args
+        .first()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(nproc.min(16));
     let rounds = 2_000_000;
-    let reps = std::env::var("TOCCATA_BENCH_REPS").ok().and_then(|s| s.parse().ok()).unwrap_or(7);
+    let reps = std::env::var("TOCCATA_BENCH_REPS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(7);
     let mut samples = Vec::with_capacity(reps);
     let mut cs = 0u64;
     for _ in 0..reps {
         let start = Instant::now();
-        let handles: Vec<_> =
-            (0..threads).map(|_| std::thread::spawn(move || churn(rounds, 512))).collect();
+        let handles: Vec<_> = (0..threads)
+            .map(|_| std::thread::spawn(move || churn(rounds, 512)))
+            .collect();
         cs = 0;
         for h in handles {
             cs = cs.wrapping_add(h.join().unwrap());
@@ -136,7 +148,9 @@ fn churn(rounds: usize, live: usize) -> u64 {
         let mut v = vec![0u8; size];
         v[0] = (r & 0xff) as u8;
         v[size - 1] = (i & 0xff) as u8;
-        checksum = checksum.wrapping_add(v[0] as u64).wrapping_add(v[size - 1] as u64);
+        checksum = checksum
+            .wrapping_add(v[0] as u64)
+            .wrapping_add(v[size - 1] as u64);
         if bufs.len() < live {
             bufs.push(v);
         } else {
@@ -148,13 +162,15 @@ fn churn(rounds: usize, live: usize) -> u64 {
 }
 
 fn throughput(allocator: &str) {
-    let nproc = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+    let nproc = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
     println!("=== allocator benchmark: {allocator} ({nproc} cpus) ===");
     let _ = churn(100_000, 256); // warm up
 
     bench_single_thread();
     bench_multi_thread(nproc.min(16));
-    bench_producer_consumer((nproc / 2).max(1).min(8));
+    bench_producer_consumer((nproc / 2).clamp(1, 8));
     bench_latency_distribution();
 
     // Keep the process alive a beat so any background purge threads (jemalloc)
@@ -177,8 +193,9 @@ fn bench_single_thread() {
 fn bench_multi_thread(threads: usize) {
     let rounds = 2_000_000;
     let start = Instant::now();
-    let handles: Vec<_> =
-        (0..threads).map(|_| std::thread::spawn(move || churn(rounds, 512))).collect();
+    let handles: Vec<_> = (0..threads)
+        .map(|_| std::thread::spawn(move || churn(rounds, 512)))
+        .collect();
     let mut cs = 0u64;
     for h in handles {
         cs = cs.wrapping_add(h.join().unwrap());
@@ -270,8 +287,10 @@ fn bench_latency_distribution() {
 // ---------------------------------------------------------------------------
 
 fn latency_tail(allocator: &str, args: &[String]) {
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::Arc;
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
 
     let secs: u64 = args.first().and_then(|s| s.parse().ok()).unwrap_or(5);
     // Total churn working-set in MiB. Keep near (just under/at) the cgroup's
@@ -287,8 +306,9 @@ fn latency_tail(allocator: &str, args: &[String]) {
     for _ in 0..4 {
         let stop = stop.clone();
         bg.push(std::thread::spawn(move || {
-            let mut blocks: Vec<Vec<u8>> =
-                (0..per_thread_mib).map(|_| vec![7u8; 1024 * 1024]).collect();
+            let mut blocks: Vec<Vec<u8>> = (0..per_thread_mib)
+                .map(|_| vec![7u8; 1024 * 1024])
+                .collect();
             let mut i = 0usize;
             while !stop.load(Ordering::Relaxed) {
                 // Replace one block (free + fresh alloc) and touch it — drives
@@ -358,12 +378,20 @@ struct Histogram {
 
 impl Histogram {
     fn new() -> Self {
-        Self { buckets: [0; 64], count: 0, max: 0 }
+        Self {
+            buckets: [0; 64],
+            count: 0,
+            max: 0,
+        }
     }
 
     #[inline]
     fn record(&mut self, ns: u64) {
-        let b = if ns == 0 { 0 } else { 63 - ns.leading_zeros() as usize };
+        let b = if ns == 0 {
+            0
+        } else {
+            63 - ns.leading_zeros() as usize
+        };
         self.buckets[b] += 1;
         self.count += 1;
         if ns > self.max {
@@ -501,8 +529,10 @@ impl SpscRing {
 /// left unpinned — the same scheduler freedom jemalloc runs under, so the
 /// comparison stays apples-to-apples.
 fn prodcons_trial(pairs: usize, fixed_size: usize, per_producer: usize) -> (f64, u64) {
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::Arc;
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
     const RING_CAP: usize = 1024;
 
     let start = Instant::now();
@@ -515,7 +545,11 @@ fn prodcons_trial(pairs: usize, fixed_size: usize, per_producer: usize) -> (f64,
             let done = done.clone();
             std::thread::spawn(move || {
                 for r in 0..per_producer {
-                    let size = if fixed_size != 0 { fixed_size } else { SIZES[r % SIZES.len()] };
+                    let size = if fixed_size != 0 {
+                        fixed_size
+                    } else {
+                        SIZES[r % SIZES.len()]
+                    };
                     let mut v = vec![0u8; size];
                     v[0] = 1;
                     ring.push(v);
@@ -556,14 +590,23 @@ fn prodcons_trial(pairs: usize, fixed_size: usize, per_producer: usize) -> (f64,
 /// because a single trial on a busy 64-cpu box is too noisy to attribute a
 /// single-digit-ns allocator change. Threads are unpinned (as jemalloc runs).
 fn prodcons(allocator: &str, args: &[String]) {
-    let nproc = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
-    let pairs: usize =
-        args.first().and_then(|s| s.parse().ok()).unwrap_or((nproc / 2).max(1).min(8));
+    let nproc = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+    let pairs: usize = args
+        .first()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or((nproc / 2).clamp(1, 8));
     let fixed_size: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
-    let per_producer: usize =
-        args.get(2).and_then(|s| s.parse::<usize>().ok()).unwrap_or(1) * 1_000_000;
-    let reps: usize =
-        std::env::var("TOCCATA_BENCH_REPS").ok().and_then(|s| s.parse().ok()).unwrap_or(7);
+    let per_producer: usize = args
+        .get(2)
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(1)
+        * 1_000_000;
+    let reps: usize = std::env::var("TOCCATA_BENCH_REPS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(7);
 
     let mut samples = Vec::with_capacity(reps);
     let mut freed = 0u64;
@@ -574,11 +617,17 @@ fn prodcons(allocator: &str, args: &[String]) {
     }
     samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let median = samples[reps / 2];
-    let size_label = if fixed_size != 0 { format!("{fixed_size}B") } else { "mixed".to_string() };
+    let size_label = if fixed_size != 0 {
+        format!("{fixed_size}B")
+    } else {
+        "mixed".to_string()
+    };
     println!(
         "=== prodcons: {allocator} (x{pairs} pairs, {size_label}, {reps} reps) ===  \
          min {:>6.2}  median {:>6.2}  max {:>6.2} ns/op   (freed {freed})",
-        samples[0], median, samples[reps - 1]
+        samples[0],
+        median,
+        samples[reps - 1]
     );
 }
 
@@ -594,7 +643,11 @@ fn rss_now_bytes() -> usize {
         Ok(s) => s,
         Err(_) => return 0,
     };
-    let resident_pages: usize = s.split_whitespace().nth(1).and_then(|f| f.parse().ok()).unwrap_or(0);
+    let resident_pages: usize = s
+        .split_whitespace()
+        .nth(1)
+        .and_then(|f| f.parse().ok())
+        .unwrap_or(0);
     let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) }.max(0) as usize;
     resident_pages * page
 }
@@ -933,7 +986,11 @@ fn frag_crossclass(allocator: &str, args: &[String]) {
 fn frag_mixed(allocator: &str, args: &[String]) {
     let ops_millions: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(50);
     let live_mib: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(256);
-    let seed: u64 = args.get(3).and_then(|s| s.parse().ok()).filter(|&s| s != 0).unwrap_or(0x9E37_79B9_7F4A_7C15);
+    let seed: u64 = args
+        .get(3)
+        .and_then(|s| s.parse().ok())
+        .filter(|&s| s != 0)
+        .unwrap_or(0x9E37_79B9_7F4A_7C15);
     let ops = ops_millions * 1_000_000;
     let live_budget = live_mib * 1024 * 1024;
 
@@ -1028,7 +1085,10 @@ fn frag_mixed(allocator: &str, args: &[String]) {
 // ---------------------------------------------------------------------------
 
 fn micro(allocator: &str, args: &[String]) {
-    let iters: u64 = args.first().and_then(|s| s.parse().ok()).unwrap_or(200_000_000);
+    let iters: u64 = args
+        .first()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(200_000_000);
     let mut sink = 0u64;
     let start = Instant::now();
     // Fixed 64-byte alloc/free, the cleanest hot path.
@@ -1055,7 +1115,10 @@ fn micro(allocator: &str, args: &[String]) {
 fn framepool(allocator: &str, args: &[String]) {
     use toccata::{FramePool, Require, ReserveOpts};
 
-    let iters: u64 = args.first().and_then(|s| s.parse().ok()).unwrap_or(50_000_000);
+    let iters: u64 = args
+        .first()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(50_000_000);
     const FRAME: usize = 64;
     const N: usize = 1 << 20; // 1Mi frames (64 MiB)
 
@@ -1106,7 +1169,9 @@ fn framepool(allocator: &str, args: &[String]) {
             unsafe { cache.free(f) };
         }
         let per = start.elapsed().as_nanos() as f64 / iters as f64;
-        println!("  cache.alloc/free (L1):    {per:>5.1} ns/op   (sink {sink})   <- acceptance bar");
+        println!(
+            "  cache.alloc/free (L1):    {per:>5.1} ns/op   (sink {sink})   <- acceptance bar"
+        );
     }
 }
 

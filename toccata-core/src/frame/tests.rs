@@ -2,9 +2,13 @@
 
 use super::*;
 use crate::sys::{Require, ReserveOpts};
-use std::collections::HashSet;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::{
+    collections::HashSet,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+};
 
 const FRAME: usize = 2048;
 const N: usize = 4096;
@@ -38,7 +42,10 @@ fn frames_are_distinct_and_indices_unique() {
     let mut frames = Vec::new();
     for _ in 0..N {
         let f = p.alloc().expect("alloc within capacity");
-        assert!(seen.insert(p.frame_index(&f)), "duplicate frame index handed out");
+        assert!(
+            seen.insert(p.frame_index(&f)),
+            "duplicate frame index handed out"
+        );
         frames.push(f);
     }
     // Pool is now exhausted.
@@ -82,7 +89,11 @@ fn metadata_survives_body_overwrite() {
     p.meta(&f).0.store(0xDEAD_BEEF, Ordering::Relaxed);
     // Clobber the entire frame body (as a kernel DMA would).
     unsafe { std::ptr::write_bytes(f.as_ptr(), 0xFF, FRAME) };
-    assert_eq!(p.meta(&f).0.load(Ordering::Relaxed), 0xDEAD_BEEF, "metadata is out of band");
+    assert_eq!(
+        p.meta(&f).0.load(Ordering::Relaxed),
+        0xDEAD_BEEF,
+        "metadata is out of band"
+    );
     unsafe { p.free(f) };
 }
 
@@ -100,7 +111,11 @@ fn refcount_reclaims_only_on_last_release() {
     // Releasing twice keeps the frame (count 3 -> 1).
     unsafe { p.free(f) };
     unsafe { p.free(f) };
-    assert_eq!(p.meta(&f).count(), 1, "frame still held after non-last releases");
+    assert_eq!(
+        p.meta(&f).count(),
+        1,
+        "frame still held after non-last releases"
+    );
 
     // The frame must NOT have been returned: drain the pool and confirm this
     // index is absent from the free set.
@@ -140,7 +155,10 @@ fn cache_roundtrip_and_exhaustion() {
     }
     // Frames flushed back through L1->L2->central are reusable.
     drop(c);
-    assert!(p.alloc().is_some(), "pool refills after cache frees + flush");
+    assert!(
+        p.alloc().is_some(),
+        "pool refills after cache frees + flush"
+    );
 }
 
 #[test]
@@ -160,7 +178,10 @@ fn cache_drop_flushes_frames_back() {
         held.push(f);
         n += 1;
     }
-    assert_eq!(n, N, "a dropped cache must not strand frames (got {n}, want {N})");
+    assert_eq!(
+        n, N,
+        "a dropped cache must not strand frames (got {n}, want {N})"
+    );
     for f in held {
         unsafe { p.free(f) };
     }
@@ -184,10 +205,15 @@ fn cache_refcount_reclaims_on_last_release() {
 fn batch_alloc_n_free_n() {
     // The AF_XDP fill/completion bulk path: grab a batch, release it, repeat.
     let p = pool::<()>();
-    let mut batch = [Frame { ptr: NonNull::dangling() }; 64];
+    let mut batch = [Frame {
+        ptr: NonNull::dangling(),
+    }; 64];
 
     let got = p.alloc_n(&mut batch);
-    assert_eq!(got, 64, "alloc_n fills the whole batch when capacity allows");
+    assert_eq!(
+        got, 64,
+        "alloc_n fills the whole batch when capacity allows"
+    );
     // Indices distinct within the batch.
     let mut seen = HashSet::new();
     for f in &batch[..got] {
@@ -199,14 +225,20 @@ fn batch_alloc_n_free_n() {
     // only what's left.
     let mut all: Vec<Frame> = Vec::new();
     loop {
-        let mut chunk = [Frame { ptr: NonNull::dangling() }; 256];
+        let mut chunk = [Frame {
+            ptr: NonNull::dangling(),
+        }; 256];
         let n = p.alloc_n(&mut chunk);
         if n == 0 {
             break;
         }
         all.extend_from_slice(&chunk[..n]);
     }
-    assert_eq!(all.len(), N, "alloc_n across batches drains exactly N frames");
+    assert_eq!(
+        all.len(),
+        N,
+        "alloc_n across batches drains exactly N frames"
+    );
     unsafe { p.free_n(&all) };
 }
 
@@ -239,7 +271,11 @@ fn frame_pool_macro_configure_alloc_free() {
 
     let f = MacroPool::alloc().expect("alloc");
     let p = MacroPool::pool().unwrap();
-    assert_eq!(p.meta(&f).count(), 1, "macro alloc sets refcount via the magazine");
+    assert_eq!(
+        p.meta(&f).count(),
+        1,
+        "macro alloc sets refcount via the magazine"
+    );
     assert!(p.frame_index(&f) < N);
 
     // Refcount through the macro free path.
@@ -292,7 +328,11 @@ fn typed_owned_and_shared_lifecycle() {
         o.tag = 9; // DerefMut
         assert_eq!(o.tag, 9);
     }
-    assert_eq!(DROPS.load(Ordering::Relaxed), 1, "Owned drop runs the destructor once");
+    assert_eq!(
+        DROPS.load(Ordering::Relaxed),
+        1,
+        "Owned drop runs the destructor once"
+    );
 
     // into_shared + clone: destructor runs once, on the LAST drop.
     DROPS.store(0, Ordering::Relaxed);
@@ -308,7 +348,11 @@ fn typed_owned_and_shared_lifecycle() {
         assert_eq!(s2.strong_count(), 1);
         drop(s2);
     }
-    assert_eq!(DROPS.load(Ordering::Relaxed), 1, "Shared destructor runs once on last drop");
+    assert_eq!(
+        DROPS.load(Ordering::Relaxed),
+        1,
+        "Shared destructor runs once on last drop"
+    );
 }
 
 // A DEDICATED typed pool + payload for the cross-thread test below, so the
@@ -353,7 +397,11 @@ fn typed_shared_cross_thread_drop_is_sound() {
         h.join().unwrap();
         drop(s); // last ref -> reclaim
     }
-    assert_eq!(DROPS_T.load(Ordering::Relaxed), n, "every payload destructor ran exactly once");
+    assert_eq!(
+        DROPS_T.load(Ordering::Relaxed),
+        n,
+        "every payload destructor ran exactly once"
+    );
     // The pool must remain functional after the cross-thread drop storm (we do NOT
     // assert single-thread drain conservation — invalid for a per-CPU pool, since
     // frames recycled on other CPUs sit in those CPUs' slabs). A healthy batch
@@ -365,7 +413,10 @@ fn typed_shared_cross_thread_drop_is_sound() {
             None => break,
         }
     }
-    assert!(!held.is_empty(), "pool must remain functional after cross-thread Shared drops");
+    assert!(
+        !held.is_empty(),
+        "pool must remain functional after cross-thread Shared drops"
+    );
     for f in held {
         unsafe { TypedConsPool::recycle(f) };
     }
@@ -442,7 +493,9 @@ fn buf_frame_frees_only_after_last_window() {
         while let Some(f) = BufFreePool::alloc() {
             v.push(f);
         }
-        let absent = v.iter().all(|f| BufFreePool::pool().unwrap().frame_index(f) != id);
+        let absent = v
+            .iter()
+            .all(|f| BufFreePool::pool().unwrap().frame_index(f) != id);
         for f in v {
             unsafe { BufFreePool::recycle(f) };
         }
@@ -451,7 +504,7 @@ fn buf_frame_frees_only_after_last_window() {
     assert!(still_held, "frame must stay out while one window lives");
 
     drop(b); // last window -> frame returns
-    // Now the id reappears in the free set.
+             // Now the id reappears in the free set.
     let mut reappeared = false;
     let mut v = Vec::new();
     while let Some(f) = BufFreePool::alloc() {
@@ -463,7 +516,10 @@ fn buf_frame_frees_only_after_last_window() {
     for f in v {
         unsafe { BufFreePool::recycle(f) };
     }
-    assert!(reappeared, "frame must return to the pool after the last window drops");
+    assert!(
+        reappeared,
+        "frame must return to the pool after the last window drops"
+    );
 }
 
 #[test]
@@ -515,7 +571,11 @@ fn buf_split_windows_cross_thread_drop() {
     for h in handles {
         h.join().unwrap();
     }
-    assert_eq!(bad.load(Ordering::Relaxed), 0, "split windows must partition the buffer exactly");
+    assert_eq!(
+        bad.load(Ordering::Relaxed),
+        0,
+        "split windows must partition the buffer exactly"
+    );
 
     // The pool must remain functional (no leak/corruption): allocate a batch.
     let mut held = Vec::new();
@@ -525,7 +585,10 @@ fn buf_split_windows_cross_thread_drop() {
             None => break,
         }
     }
-    assert!(!held.is_empty(), "pool must remain functional after the storm");
+    assert!(
+        !held.is_empty(),
+        "pool must remain functional after the storm"
+    );
     for f in held {
         unsafe { BufConsPool::recycle(f) };
     }
@@ -542,7 +605,10 @@ fn frame_pool_macro_configure_over_borrowed() {
     let nn = NonNull::new(base).unwrap();
     unsafe { MacroOverPool::configure_over(nn, len, FRAME).expect("configure_over") };
     let f = MacroOverPool::alloc().expect("alloc");
-    assert_eq!(MacroOverPool::pool().unwrap().into_addr(f) as usize % FRAME, 0);
+    assert_eq!(
+        MacroOverPool::pool().unwrap().into_addr(f) as usize % FRAME,
+        0
+    );
     unsafe { MacroOverPool::free(f) };
     // NOTE: the leaked &'static pool keeps `base` referenced for the process
     // lifetime, so we intentionally do not free `layout` here (test-process exit

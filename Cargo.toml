@@ -6,9 +6,12 @@ members = ["toccata-core", "toccata", "toccata-bench"]
 exclude = ["toccata-loom"]
 
 [workspace.package]
+# MSRV is 1.82: the Linux rseq fast path uses `&raw` references and `const`
+# operands in inline asm, both stabilized in 1.82. (The portable non-Linux dev
+# build compiles without them, but Linux is the real target.)
 version = "0.0.0"
 edition = "2021"
-rust-version = "1.81"
+rust-version = "1.82"
 license = "MIT"
 repository = "https://github.com/camshaft/toccata"
 authors = ["Cameron Bytheway"]
@@ -17,7 +20,11 @@ authors = ["Cameron Bytheway"]
 libc = "0.2.170"
 allocator-api2 = { version = "0.2", default-features = false, features = ["alloc"] }
 linkme = "0.3"
-toccata-core = { version = "0.0.0", path = "./toccata-core" }
+# default-features = false is load-bearing and set here at the root so every
+# inheritor gets it: it guarantees cargo feature unification can never silently
+# pull toccata-core's supervisor/metrics into a build that didn't ask for them.
+# (Set on the member side it is ignored unless also declared here.)
+toccata-core = { version = "0.0.0", path = "./toccata-core", default-features = false }
 
 [profile.release]
 debug = true      # keep symbols for perf/benchmark profiling

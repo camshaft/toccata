@@ -12,8 +12,7 @@
 
 #![cfg(target_os = "linux")]
 
-use toccata_core::OnExhaust;
-use toccata_core::SubHeapBuilder;
+use toccata_core::{OnExhaust, SubHeapBuilder};
 
 #[global_allocator]
 static GLOBAL: toccata::Toccata = toccata::Toccata::new();
@@ -44,7 +43,7 @@ fn std_collections_run_on_toccata() {
     for _ in 0..10_000 {
         s.push_str("toccata");
     }
-    assert_eq!(s.len(), 80_000);
+    assert_eq!(s.len(), 70_000); // "toccata" is 7 bytes × 10_000
 
     // HashMap (BTreeMap-free; exercises many small allocations + frees).
     let mut m = std::collections::HashMap::new();

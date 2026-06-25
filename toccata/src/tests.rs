@@ -15,7 +15,10 @@ fn pre_configure_delegates_to_system() {
     let layout = Layout::from_size_align(64, 8).unwrap();
     let p = unsafe { a.alloc(layout) };
     assert!(!p.is_null());
-    assert!(!in_pool(p), "pre-configure alloc must come from System, not the pool");
+    assert!(
+        !in_pool(p),
+        "pre-configure alloc must come from System, not the pool"
+    );
     unsafe {
         std::ptr::write_bytes(p, 0xEE, 64);
         assert_eq!(*p, 0xEE);
@@ -29,7 +32,10 @@ fn zero_sized_alloc_is_dangling_aligned() {
     let a = Toccata;
     let layout = Layout::from_size_align(0, 16).unwrap();
     let p = unsafe { a.alloc(layout) };
-    assert_eq!(p as usize, 16, "ZST alloc returns align as dangling pointer");
+    assert_eq!(
+        p as usize, 16,
+        "ZST alloc returns align as dangling pointer"
+    );
     unsafe { a.dealloc(p, layout) }; // no-op, must not crash
 }
 
@@ -40,7 +46,11 @@ fn pre_configure_alloc_is_aligned() {
         let layout = Layout::from_size_align(align.max(1), align).unwrap();
         let p = unsafe { a.alloc(layout) };
         assert!(!p.is_null());
-        assert_eq!(p as usize % align, 0, "System-delegated alloc must honor align {align}");
+        assert_eq!(
+            p as usize % align,
+            0,
+            "System-delegated alloc must honor align {align}"
+        );
         unsafe { a.dealloc(p, layout) };
     }
 }

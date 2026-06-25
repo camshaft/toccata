@@ -63,7 +63,11 @@ mod tests {
         assert!(!ptrs.is_empty());
 
         let u = usage(&sh);
-        assert_eq!(u.live_bytes, ptrs.len() * osz, "Layer-1 must report live bytes");
+        assert_eq!(
+            u.live_bytes,
+            ptrs.len() * osz,
+            "Layer-1 must report live bytes"
+        );
         assert_eq!(u.live_objects, ptrs.len() as u64);
         assert!(u.utilization() > 0.0 && u.utilization() < 1.0);
 

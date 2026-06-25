@@ -72,7 +72,10 @@ impl Budgets {
     /// Start a budget config with a `total_bytes` cap (the max toccata will
     /// reserve+lock across all sub-heaps).
     pub fn new(total_bytes: usize) -> Self {
-        Self { total: total_bytes, subs: allocator_api2::vec::Vec::new_in(crate::Sys) }
+        Self {
+            total: total_bytes,
+            subs: allocator_api2::vec::Vec::new_in(crate::Sys),
+        }
     }
 
     /// Assign `bytes` to the sub-heap registered under `name`. Chainable.
@@ -110,7 +113,10 @@ impl std::fmt::Display for ConfigureError {
         match self {
             ConfigureError::AlreadyConfigured => write!(f, "toccata registry already configured"),
             ConfigureError::Unconfigured(n) => {
-                write!(f, "registered sub-heap '{n}' has no budget in the config map")
+                write!(
+                    f,
+                    "registered sub-heap '{n}' has no budget in the config map"
+                )
             }
             ConfigureError::OverBudget { requested, total } => write!(
                 f,
@@ -140,11 +146,16 @@ pub fn configure(budgets: &Budgets) -> Result<(), ConfigureError> {
     // Validate: every registration has a budget; the sum fits.
     let mut sum = 0usize;
     for reg in REGISTRATIONS {
-        let b = budgets.lookup(reg.name).ok_or(ConfigureError::Unconfigured(reg.name))?;
+        let b = budgets
+            .lookup(reg.name)
+            .ok_or(ConfigureError::Unconfigured(reg.name))?;
         sum = sum.saturating_add(b);
     }
     if sum > budgets.total {
-        return Err(ConfigureError::OverBudget { requested: sum, total: budgets.total });
+        return Err(ConfigureError::OverBudget {
+            requested: sum,
+            total: budgets.total,
+        });
     }
 
     // Build each sub-heap; store handles in a SYSTEM-backed vec, and leak each
@@ -158,25 +169,33 @@ pub fn configure(budgets: &Budgets) -> Result<(), ConfigureError> {
             .cap_per_class(reg.cap_per_class)
             .build_standalone()
             .map_err(|e| ConfigureError::Reserve(reg.name, e))?;
-        let leaked: &'static SubHeap = allocator_api2::boxed::Box::leak(
-            allocator_api2::boxed::Box::new_in(sh, crate::Sys),
-        );
+        let leaked: &'static SubHeap =
+            allocator_api2::boxed::Box::leak(allocator_api2::boxed::Box::new_in(sh, crate::Sys));
         map.push((reg.name, leaked));
     }
 
-    CONFIGURED.set(map).map_err(|_| ConfigureError::AlreadyConfigured)?;
+    CONFIGURED
+        .set(map)
+        .map_err(|_| ConfigureError::AlreadyConfigured)?;
     Ok(())
 }
 
 /// Fetch a configured sub-heap by name. `None` before [`configure`] or for an
 /// unregistered name.
 pub fn subheap(name: &str) -> Option<&'static SubHeap> {
-    CONFIGURED.get()?.iter().find(|(n, _)| *n == name).map(|(_, sh)| *sh)
+    CONFIGURED
+        .get()?
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, sh)| *sh)
 }
 
 /// Iterate all configured sub-heaps (for the metrics layer).
 pub fn all() -> impl Iterator<Item = (&'static str, &'static SubHeap)> {
-    CONFIGURED.get().into_iter().flat_map(|m| m.iter().map(|(k, v)| (*k, *v)))
+    CONFIGURED
+        .get()
+        .into_iter()
+        .flat_map(|m| m.iter().map(|(k, v)| (*k, *v)))
 }
 
 /// Whether the registry has been configured.

@@ -22,8 +22,10 @@
 //! All Unix: pthread keys are POSIX, so this works on Linux, macOS, the BSDs.
 #![cfg(unix)]
 
-use core::cell::UnsafeCell;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::{
+    cell::UnsafeCell,
+    sync::atomic::{AtomicBool, Ordering},
+};
 use std::sync::Once;
 
 /// A thread-local `T`, safe to access from within the global allocator.
@@ -149,7 +151,8 @@ impl<T: 'static> PthreadLocal<T> {
 fn abort_no_tls() -> ! {
     // SAFETY: write(2) to stderr is async-signal-safe and allocation-free.
     unsafe {
-        let msg = b"toccata-sys: thread-local storage unavailable (pthread key/alloc failed); aborting\n";
+        let msg =
+            b"toccata-sys: thread-local storage unavailable (pthread key/alloc failed); aborting\n";
         libc::write(2, msg.as_ptr() as *const libc::c_void, msg.len());
     }
     std::process::abort();

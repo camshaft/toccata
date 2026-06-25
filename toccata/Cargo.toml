@@ -19,10 +19,11 @@ default = []
 supervisor = ["toccata-core/supervisor"]
 
 [dependencies]
-# default-features = false is load-bearing: it guarantees cargo feature
-# unification can never silently pull toccata-core's supervisor/metrics into the
-# global build. The global allocator needs only the core SubHeap/sys surface. (The
-# rseq fast path is not a feature — it auto-compiles on Linux x86_64/aarch64.)
-toccata-core = { workspace = true, default-features = false }
+# default-features = false is inherited from the workspace root (load-bearing:
+# it keeps cargo feature unification from silently pulling toccata-core's
+# supervisor/metrics into the global build — the global allocator needs only the
+# core SubHeap/sys surface). The rseq fast path is not a feature — it
+# auto-compiles on Linux x86_64/aarch64.
+toccata-core = { workspace = true }
 ctor = "0.2"
 libc.workspace = true

@@ -22,7 +22,10 @@
 //! remains fully correct.
 
 pub mod abi;
-#[cfg(all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64")))]
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 pub mod asm;
 pub mod membarrier;
 pub mod slab;
@@ -37,5 +40,7 @@ pub use slab::{ClassLoc, CpuStack, Fast, Header, SlabLayout};
 /// Whether the atomic-free RSEQ fast path is compiled in: automatic on Linux
 /// x86_64/aarch64. When false (other platforms), the locked baseline is used.
 /// Note: even when true, an old kernel without rseq still falls back at runtime.
-pub const RSEQ_FASTPATH: bool =
-    cfg!(all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64")));
+pub const RSEQ_FASTPATH: bool = cfg!(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+));

@@ -42,7 +42,12 @@ pub struct Rseq {
 
 impl Rseq {
     pub const fn zeroed() -> Self {
-        Self { cpu_id_start: 0, cpu_id: 0, rseq_cs: 0, flags: 0 }
+        Self {
+            cpu_id_start: 0,
+            cpu_id: 0,
+            rseq_cs: 0,
+            flags: 0,
+        }
     }
 }
 
