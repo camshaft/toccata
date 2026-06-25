@@ -1,10 +1,6 @@
 [workspace]
 resolver = "2"
-members = [
-    "toccata-core",
-    "toccata",
-    "toccata-bench",
-]
+members = ["toccata-core", "toccata", "toccata-bench"]
 # toccata-loom is excluded from the default workspace build: it only compiles
 # under `--cfg loom` with the loom shims. Built explicitly in CI.
 exclude = ["toccata-loom"]
@@ -21,9 +17,10 @@ authors = ["Cameron Bytheway"]
 libc = "0.2.170"
 allocator-api2 = { version = "0.2", default-features = false, features = ["alloc"] }
 linkme = "0.3"
+toccata-core = { version = "0.0.0", path = "./toccata-core" }
 
 [profile.release]
-debug = true        # keep symbols for perf/benchmark profiling
+debug = true      # keep symbols for perf/benchmark profiling
 codegen-units = 1
 lto = "thin"
 

@@ -23,6 +23,6 @@ supervisor = ["toccata-core/supervisor"]
 # unification can never silently pull toccata-core's supervisor/metrics into the
 # global build. The global allocator needs only the core SubHeap/sys surface. (The
 # rseq fast path is not a feature — it auto-compiles on Linux x86_64/aarch64.)
-toccata-core = { path = "../toccata-core", default-features = false }
+toccata-core = { workspace = true, default-features = false }
 ctor = "0.2"
 libc.workspace = true
