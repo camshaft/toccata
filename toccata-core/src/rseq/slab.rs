@@ -328,7 +328,6 @@ impl<'a> CpuStack<'a> {
                     loc.header_off,
                     loc.slots_off,
                     self.layout.stopped.as_ptr() as *const u8,
-                    STOP_SHIFT,
                 )
             };
             match r {
@@ -367,7 +366,6 @@ impl<'a> CpuStack<'a> {
                     loc.header_off,
                     loc.slots_off,
                     self.layout.stopped.as_ptr() as *const u8,
-                    STOP_SHIFT,
                 )
             };
             match r {
@@ -405,7 +403,6 @@ impl<'a> CpuStack<'a> {
                     loc.slots_off,
                     obj.as_ptr(),
                     self.layout.stopped.as_ptr() as *const u8,
-                    STOP_SHIFT,
                 )
             };
             match r {
@@ -435,7 +432,6 @@ impl<'a> CpuStack<'a> {
                     loc.slots_off,
                     obj.as_ptr(),
                     self.layout.stopped.as_ptr() as *const u8,
-                    STOP_SHIFT,
                 )
             };
             match r {

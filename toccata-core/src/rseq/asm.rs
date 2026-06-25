@@ -22,7 +22,10 @@
     any(target_arch = "x86_64", target_arch = "aarch64")
 ))]
 
-use crate::rseq::abi::{self, Rseq, RSEQ_SIG};
+use crate::rseq::{
+    abi::{self, Rseq, RSEQ_SIG},
+    slab::STOP_SHIFT,
+};
 
 /// Outcome of an rseq fast-path attempt.
 pub enum RseqResult {
@@ -52,7 +55,6 @@ pub unsafe fn pop(
     header_off: u32,
     slots_off: u32,
     stop_base: *const u8,
-    stop_shift: u32,
 ) -> RseqResult {
     let rseq_ptr = abi::rseq().as_ptr();
     let obj: *mut u8;
@@ -90,8 +92,9 @@ pub unsafe fn pop(
         // STOP-FLAG CHECK (seize protocol): if the supervisor has stopped this
         // CPU, bail to the slow path. Set before the seize membarrier, so any
         // section that survives/starts past the fence sees it. stop[cpu] at
-        // stop_base + (cpu << stop_shift).
-        "lsl {tmp}, {cpu}, {stop_shift}",
+        // stop_base + (cpu << stop_shift). stop_shift is the compile-time constant
+        // STOP_SHIFT, passed as an asm `const` (immediate lsl).
+        "lsl {tmp}, {cpu}, #{stop_shift}",
         "ldr {tmp2:w}, [{stop_base}, {tmp}]",
         "cbnz {tmp2:w}, 92f",
         // block = base + (cpu << shift)
@@ -127,7 +130,6 @@ pub unsafe fn pop(
         header_off = in(reg) header_off as u64,
         slots_off = in(reg) slots_off as u64,
         stop_base = in(reg) stop_base,
-        stop_shift = in(reg) stop_shift as u64,
         loops = inout(reg) 5u64 => _,
         cpu = out(reg) cpu_out,
         blk = out(reg) _,
@@ -139,6 +141,7 @@ pub unsafe fn pop(
         obj = out(reg) obj,
         status = out(reg) status,
         sig = const RSEQ_SIG,
+        stop_shift = const STOP_SHIFT,
         cpu_start_off = const core::mem::offset_of!(Rseq, cpu_id_start),
         cpu_id_off = const core::mem::offset_of!(Rseq, cpu_id),
         cs_off = const core::mem::offset_of!(Rseq, rseq_cs),
@@ -158,7 +161,6 @@ pub unsafe fn pop(
 /// As [`pop`]. `obj` must be a valid pointer to store.
 #[cfg(target_arch = "aarch64")]
 #[inline]
-#[allow(clippy::too_many_arguments)] // layout is passed positionally to keep the asm shim flat
 pub unsafe fn push(
     base: *mut u8,
     shift: u32,
@@ -167,7 +169,6 @@ pub unsafe fn push(
     slots_off: u32,
     obj: *mut u8,
     stop_base: *const u8,
-    stop_shift: u32,
 ) -> RseqResult {
     let rseq_ptr = abi::rseq().as_ptr();
     let mut status: u64;
@@ -197,8 +198,9 @@ pub unsafe fn push(
         "ldr {tmp:w}, [{rseq}, #{cpu_id_off}]",
         "cmp {cpu:w}, {tmp:w}",
         "b.ne 7b",
-        // STOP-FLAG CHECK (seize protocol)
-        "lsl {tmp}, {cpu}, {stop_shift}",
+        // STOP-FLAG CHECK (seize protocol). stop_shift is the compile-time
+        // constant STOP_SHIFT, passed as an asm `const` (immediate lsl).
+        "lsl {tmp}, {cpu}, #{stop_shift}",
         "ldr {cap:w}, [{stop_base}, {tmp}]",
         "cbnz {cap:w}, 92f",
         "lsl {blk}, {cpu}, {shift}",
@@ -236,7 +238,6 @@ pub unsafe fn push(
         slots_off = in(reg) slots_off as u64,
         obj = in(reg) obj,
         stop_base = in(reg) stop_base,
-        stop_shift = in(reg) stop_shift as u64,
         loops = inout(reg) 5u64 => _,
         cpu = out(reg) cpu_out,
         blk = out(reg) _,
@@ -247,6 +248,7 @@ pub unsafe fn push(
         tmp = out(reg) _,
         status = out(reg) status,
         sig = const RSEQ_SIG,
+        stop_shift = const STOP_SHIFT,
         cpu_start_off = const core::mem::offset_of!(Rseq, cpu_id_start),
         cpu_id_off = const core::mem::offset_of!(Rseq, cpu_id),
         cs_off = const core::mem::offset_of!(Rseq, rseq_cs),
@@ -274,7 +276,6 @@ pub unsafe fn pop(
     header_off: u32,
     slots_off: u32,
     stop_base: *const u8,
-    stop_shift: u32,
 ) -> RseqResult {
     let rseq_ptr = abi::rseq().as_ptr();
     let obj: *mut u8;
@@ -303,9 +304,13 @@ pub unsafe fn pop(
         "2:",
         "cmp {cpu:e}, [{rseq}+{cpu_id_off}]",
         "jne 7b",
-        // STOP-FLAG CHECK (seize protocol): stop[cpu] at stop_base+(cpu<<stop_shift)
+        // STOP-FLAG CHECK (seize protocol): stop[cpu] at stop_base+(cpu<<stop_shift).
+        // stop_shift is the compile-time constant STOP_SHIFT, passed as an asm
+        // `const` (immediate `shl`) rather than a register — x86_64 has only 15
+        // usable GPRs and this block is register-starved, so every avoidable
+        // register matters.
         "mov {tmp}, {cpu}",
-        "shlx {tmp}, {tmp}, {stop_shift}",
+        "shl {tmp}, {stop_shift}",
         "mov {cur:e}, [{stop_base}+{tmp}]",
         "test {cur:e}, {cur:e}",
         "jnz 92f",
@@ -318,8 +323,12 @@ pub unsafe fn pop(
         "test {cur:e}, {cur:e}",
         "jz 90f",
         "dec {cur:e}",
-        // obj = [blk + slots_off + cur*8]
-        "mov {obj}, [{blk}+{slots_off}+{cur}*8]",
+        // obj = slots[cur], slots = blk + slots_off. x86 memory operands allow
+        // only [base + index*scale], so fold blk+slots_off via lea first (reusing
+        // {tmp}, dead here and recomputed on every restart) rather than a
+        // three-register [blk+slots_off+cur*8].
+        "lea {tmp}, [{blk}+{slots_off}]",
+        "mov {obj}, [{tmp}+{cur}*8]",
         // *** SINGLE COMMIT STORE ***
         "mov [{blk}+{header_off}], {cur:e}",
         "6:",
@@ -342,7 +351,6 @@ pub unsafe fn pop(
         header_off = in(reg) header_off as u64,
         slots_off = in(reg) slots_off as u64,
         stop_base = in(reg) stop_base,
-        stop_shift = in(reg) stop_shift as u64,
         loops = inout(reg) 5u64 => _,
         cpu = out(reg) cpu_out,
         blk = out(reg) _,
@@ -351,6 +359,7 @@ pub unsafe fn pop(
         obj = out(reg) obj,
         status = out(reg) status,
         sig = const RSEQ_SIG,
+        stop_shift = const STOP_SHIFT,
         cpu_start_off = const core::mem::offset_of!(Rseq, cpu_id_start),
         cpu_id_off = const core::mem::offset_of!(Rseq, cpu_id),
         cs_off = const core::mem::offset_of!(Rseq, rseq_cs),
@@ -369,7 +378,6 @@ pub unsafe fn pop(
 /// As [`pop`]. `obj` must be a valid pointer to store.
 #[cfg(target_arch = "x86_64")]
 #[inline]
-#[allow(clippy::too_many_arguments)] // layout is passed positionally to keep the asm shim flat
 pub unsafe fn push(
     base: *mut u8,
     shift: u32,
@@ -378,7 +386,6 @@ pub unsafe fn push(
     slots_off: u32,
     obj: *mut u8,
     stop_base: *const u8,
-    stop_shift: u32,
 ) -> RseqResult {
     let rseq_ptr = abi::rseq().as_ptr();
     let mut status: u64;
@@ -406,9 +413,11 @@ pub unsafe fn push(
         "2:",
         "cmp {cpu:e}, [{rseq}+{cpu_id_off}]",
         "jne 7b",
-        // STOP-FLAG CHECK (seize protocol)
+        // STOP-FLAG CHECK (seize protocol). stop_shift is the compile-time
+        // constant STOP_SHIFT, passed as an asm `const` (immediate `shl`) to save
+        // a register on the register-starved x86_64 path.
         "mov {tmp}, {cpu}",
-        "shlx {tmp}, {tmp}, {stop_shift}",
+        "shl {tmp}, {stop_shift}",
         "mov {cap:e}, [{stop_base}+{tmp}]",
         "test {cap:e}, {cap:e}",
         "jnz 92f",
@@ -419,7 +428,10 @@ pub unsafe fn push(
         "mov {cap:e}, [{blk}+{header_off}+4]",
         "cmp {cur:e}, {cap:e}",
         "jae 90f",
-        "mov [{blk}+{slots_off}+{cur}*8], {obj}",
+        // slots[cur] = obj, slots = blk + slots_off. Fold via lea (reusing {tmp},
+        // dead here) — x86 forbids the three-register [blk+slots_off+cur*8].
+        "lea {tmp}, [{blk}+{slots_off}]",
+        "mov [{tmp}+{cur}*8], {obj}",
         "inc {cur:e}",
         // *** SINGLE COMMIT STORE ***
         "mov [{blk}+{header_off}], {cur:e}",
@@ -443,7 +455,6 @@ pub unsafe fn push(
         slots_off = in(reg) slots_off as u64,
         obj = in(reg) obj,
         stop_base = in(reg) stop_base,
-        stop_shift = in(reg) stop_shift as u64,
         loops = inout(reg) 5u64 => _,
         cpu = out(reg) cpu_out,
         blk = out(reg) _,
@@ -452,6 +463,7 @@ pub unsafe fn push(
         tmp = out(reg) _,
         status = out(reg) status,
         sig = const RSEQ_SIG,
+        stop_shift = const STOP_SHIFT,
         cpu_start_off = const core::mem::offset_of!(Rseq, cpu_id_start),
         cpu_id_off = const core::mem::offset_of!(Rseq, cpu_id),
         cs_off = const core::mem::offset_of!(Rseq, rseq_cs),
