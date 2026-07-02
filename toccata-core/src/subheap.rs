@@ -14,6 +14,7 @@
 //! free, the supervisor, and the rseq fast path arrive in later phases.
 
 use crate::{
+    frame::{FrameMeta, Reclaim},
     rseq::slab::{ClassLoc, CpuStack, Fast, Header, SlabLayout},
     sizeclass::{self},
     sys::Reservation,
@@ -481,7 +482,26 @@ fn thread_shard_id() -> u32 {
 
 /// A sub-heap. Created by the registry/builder during `configure()`; handed to
 /// consumers as a `&'static SubHeap` (or via a `Copy` handle in later phases).
-pub struct SubHeap {
+///
+/// The type parameter `M` is optional **out-of-band per-object metadata**, sharing
+/// the [`FrameMeta`](crate::FrameMeta)/[`Reclaim`](crate::Reclaim)/[`RefCount`](crate::RefCount)
+/// vocabulary of [`FramePool`](crate::FramePool): each object gets a slot in a
+/// parallel `M[]` array (indexed by span + intra-span slot, never stored in the
+/// object body), so a refcount / ownership tag survives even when the object body
+/// is overwritten out from under us (an AF_XDP UMEM the kernel DMAs into). The
+/// default `M = ()` is a plain sub-heap: `on_free` always reclaims and the array is
+/// a zero-sized no-op, so it costs nothing and every existing user is unchanged.
+///
+/// **Metadata is only maintained on the DIRECT hand-out paths** —
+/// [`alloc_class`](Self::alloc_class)/[`alloc_large`](Self::alloc_large) apply
+/// `on_alloc`, and [`dealloc_class`](Self::dealloc_class)/
+/// [`dealloc_large`](Self::dealloc_large) (and the [`dealloc_by_ptr`](Self::dealloc_by_ptr)
+/// that routes to them) gate on `on_free`. A non-`()` `M` is therefore only
+/// supported through those direct paths; the batch/magazine path
+/// ([`dealloc_class_batch`](Self::dealloc_class_batch), the L1 magazine, and
+/// L2↔central movement) assumes `M = ()` and does no metadata work (see that
+/// method's note).
+pub struct SubHeap<M = ()> {
     name: &'static str,
     on_exhaust: OnExhaust,
 
@@ -519,17 +539,38 @@ pub struct SubHeap {
     /// the owning CPU's padded cell on the hot path — no global atomic contention.
     counters: PerCpuCounters,
 
+    /// Out-of-band per-object metadata `M`, indexed by
+    /// [`obj_index`](Self::obj_index). Length `num_spans * slots_per_span` where
+    /// `slots_per_span = SPAN_BYTES / min_osz`. For `M = ()` this is a zero-sized
+    /// array and every `on_alloc`/`on_free` folds away.
+    meta: crate::SysBoxSlice<M>,
+    /// The metadata index granularity: the smallest object size any class in this
+    /// sub-heap can be, used to size the per-span slot count
+    /// (`slots_per_span = SPAN_BYTES / min_osz`). A real object of size `osz >=
+    /// min_osz` therefore always yields an intra-span slot `< slots_per_span`, so
+    /// [`obj_index`](Self::obj_index) never runs off the array. `build_standalone`
+    /// uses `MIN_ALIGN` (full density, today's behavior); `build_over` takes it
+    /// from the caller.
+    min_osz: usize,
+
     /// Keeps the backing reservation slice alive for the sub-heap's lifetime.
-    /// `None` for sub-heaps that borrow a shared reservation (set by the owner).
+    /// `None` for sub-heaps that borrow a shared reservation (set by the owner) or
+    /// that borrow their whole arena (`build_over`, where the slab lives in
+    /// `_slab_reservation` instead).
     _reservation: Option<Reservation>,
+    /// For a borrowed-arena sub-heap ([`build_over`](SubHeapBuilder::build_over)):
+    /// the sub-heap's OWN reservation holding only the slab metadata, kept alive so
+    /// the kernel that DMAs the borrowed arena can never clobber it. `None` for a
+    /// standalone sub-heap (its slab lives inside `_reservation`).
+    _slab_reservation: Option<Reservation>,
 }
 
-// SAFETY: all interior mutability is atomic or mutex-guarded; pointers are into
-// the owned reservation.
-unsafe impl Send for SubHeap {}
-unsafe impl Sync for SubHeap {}
+// SAFETY: all interior mutability is atomic or mutex-guarded (or, for `meta`, the
+// user's `M` — required Send + Sync); pointers are into the arena.
+unsafe impl<M: Send + Sync> Send for SubHeap<M> {}
+unsafe impl<M: Send + Sync> Sync for SubHeap<M> {}
 
-impl SubHeap {
+impl<M: FrameMeta + Send + Sync> SubHeap<M> {
     #[inline]
     pub fn name(&self) -> &'static str {
         self.name
@@ -572,6 +613,78 @@ impl SubHeap {
     fn central(&self, shard: u32, class: usize) -> &CentralList {
         let s = (shard % self.num_shards) as usize;
         &self.central[s * sizeclass::NUM_CLASSES + class]
+    }
+
+    /// Number of metadata slots per span (`SPAN_BYTES / min_osz`). Every span's
+    /// objects, whatever their (>= `min_osz`) size, index into `[0, slots_per_span)`.
+    #[inline]
+    fn slots_per_span(&self) -> usize {
+        super::meta::SPAN_BYTES / self.min_osz
+    }
+
+    /// The index into the out-of-band `meta` array for an object at `ptr` whose
+    /// size class object-size is `osz`:
+    /// `span_of(ptr) * slots_per_span + (ptr - span_base(span)) / osz`.
+    ///
+    /// This is sound (stays within `num_spans * slots_per_span`) for any real
+    /// object because `osz >= self.min_osz`, so the intra-span term
+    /// `(ptr - span_base)/osz <= (SPAN_BYTES-1)/min_osz < SPAN_BYTES/min_osz =
+    /// slots_per_span`, and the object was carved inside its span. The slot address
+    /// is exact for the same reason `SpanBitmaps` is: a span belongs to one class,
+    /// objects are tiled at `span_base + slot*osz`.
+    #[inline]
+    fn obj_index(&self, ptr: NonNull<u8>, osz: usize) -> usize {
+        debug_assert!(
+            osz >= self.min_osz,
+            "obj_index osz {osz} below min_osz {}",
+            self.min_osz
+        );
+        let span = self.bitmaps.span_of(ptr.as_ptr());
+        let intra = (ptr.as_ptr() as usize - self.bitmaps.span_base(span)) / osz;
+        (span as usize) * self.slots_per_span() + intra
+    }
+
+    /// This object's out-of-band metadata `M`. `class` is the object's size class
+    /// (as recovered from the span table or known by the caller); it selects the
+    /// object-size used to index within the span. Mirrors [`FramePool::meta`](crate::FramePool::meta).
+    ///
+    /// # Panics
+    /// If `class` is out of range for the size-class table.
+    #[inline]
+    pub fn meta(&self, ptr: NonNull<u8>, class: usize) -> &M {
+        &self.meta[self.obj_index(ptr, sizeclass::size_of_class(class))]
+    }
+
+    /// The base of this sub-heap's object arena (the span-grid origin). For a
+    /// borrowed-arena sub-heap this is exactly the caller-supplied `base`, so a
+    /// UMEM offset is `ptr - arena_base` losslessly.
+    #[inline]
+    pub fn arena_base(&self) -> *mut u8 {
+        self.arena.base as *mut u8
+    }
+
+    /// The object's offset from the arena base — the address a ring (AF_XDP
+    /// FILL/COMPLETION/RX/TX) speaks. Mirrors [`FramePool::into_addr`](crate::FramePool::into_addr).
+    #[inline]
+    pub fn into_addr(&self, ptr: NonNull<u8>) -> u64 {
+        (ptr.as_ptr() as usize - self.arena.base) as u64
+    }
+
+    /// Reconstitute an object pointer from an arena offset returned by a ring. The
+    /// object's metadata is intact (out of band) even if the kernel DMA'd over the
+    /// object body. Mirrors [`FramePool::from_addr`](crate::FramePool::from_addr).
+    ///
+    /// # Safety
+    /// `addr` must be an offset this sub-heap previously handed out via
+    /// [`into_addr`](Self::into_addr) (in range), and the object must be logically
+    /// owned by the caller again.
+    #[inline]
+    pub unsafe fn from_addr(&self, addr: u64) -> NonNull<u8> {
+        debug_assert!(
+            (addr as usize) < self.budget_bytes,
+            "addr out of arena range"
+        );
+        NonNull::new_unchecked((self.arena.base + addr as usize) as *mut u8)
     }
 
     /// **Lock-free** deposit of one freed object into its home shard's bitmap pool:
@@ -923,6 +1036,10 @@ impl SubHeap {
         #[cfg(not(toccata_no_accounting))]
         self.counters.add_local(cpu, obj_size, 1);
         let _ = (obj_size, cpu);
+        // Direct hand-out: initialize this object's out-of-band metadata (no-op for
+        // M = ()). Only the direct alloc_class/alloc_large paths carry M; the batch
+        // refill_batch path does not (assumes M = ()).
+        self.meta[self.obj_index(ptr, obj_size as usize)].on_alloc();
         Some(ptr)
     }
 
@@ -941,8 +1058,14 @@ impl SubHeap {
     /// freed already.
     #[inline]
     pub unsafe fn dealloc_class(&self, ptr: NonNull<u8>, class: usize) {
-        let home = self.spans.home_relaxed(ptr.as_ptr());
         let obj_size = sizeclass::size_of_class(class) as i64;
+        // Out-of-band metadata gate (no-op for M = (): folds to Reclaim::Free). On
+        // Keep, another reference remains — return BEFORE any freeing OR accounting,
+        // mirroring FramePool::free / FrameCache::free.
+        if self.meta[self.obj_index(ptr, obj_size as usize)].on_free() == Reclaim::Keep {
+            return;
+        }
+        let home = self.spans.home_relaxed(ptr.as_ptr());
         let my_shard = thread_shard_id() % self.num_shards;
 
         let stack = CpuStack::current(&self.slab);
@@ -981,6 +1104,13 @@ impl SubHeap {
     /// taker). This is what removes the producer/consumer collision that made the
     /// steady-state cross-thread latency bimodal. Independent pairs hit disjoint
     /// shards, so there is no cross-pair contention either.
+    ///
+    /// # Metadata
+    /// This path is **not** hooked for out-of-band `M`: an `M` with a non-`()` type
+    /// is only supported via the direct `alloc_class`/`dealloc_class`/
+    /// `dealloc_by_ptr` paths. The batch/magazine path assumes `M = ()` (where the
+    /// `on_free` gate is a no-op that always reclaims), so it frees unconditionally
+    /// without consulting `meta`.
     ///
     /// # Safety
     /// Every `ptr` in `ptrs` must have come from `alloc_class(class)` on this
@@ -1337,12 +1467,28 @@ impl SubHeap {
             .unwrap_or(0)
             .min(self.counters.cells.len() as u32 - 1);
         self.counters.add_remote(cpu, run_bytes as i64, 1);
-        Some(unsafe { NonNull::new_unchecked(ptr) })
+        // Direct hand-out: a large object owns slot 0 of its head span's metadata
+        // range (its osz exceeds min_osz, so it can't share the slot). No-op for
+        // M = ().
+        let nn = unsafe { NonNull::new_unchecked(ptr) };
+        self.meta[self.large_meta_index(nn)].on_alloc();
+        Some(nn)
+    }
+
+    /// Metadata slot index for a large object: slot 0 of its head span's range.
+    #[inline]
+    fn large_meta_index(&self, ptr: NonNull<u8>) -> usize {
+        (self.bitmaps.span_of(ptr.as_ptr()) as usize) * self.slots_per_span()
     }
 
     /// Free a large run by pointer, recycling it for its span-count.
     #[cold]
     unsafe fn dealloc_large(&self, ptr: NonNull<u8>) {
+        // Out-of-band metadata gate (no-op for M = ()). On Keep, a reference remains
+        // — return before recycling the run OR accounting, mirroring dealloc_class.
+        if self.meta[self.large_meta_index(ptr)].on_free() == Reclaim::Keep {
+            return;
+        }
         let idx = self.large.span_index(ptr.as_ptr());
         let span_count = self.large.run_spans[idx].swap(0, Ordering::AcqRel) as usize;
         debug_assert!(span_count > 0, "dealloc_large on a non-run pointer");
@@ -1513,6 +1659,20 @@ const SHARDS_PER_CPU: u32 = 4;
 /// Upper bound on shard count: the span table packs `home` into a `u16`.
 const MAX_SHARDS: u32 = u16::MAX as u32;
 
+/// The computed per-CPU slab geometry (shared by `build_standalone` and
+/// `build_over`): the per-class locations within a CPU block, the block size, its
+/// power-of-two `shift`/`stride`, and the total slab byte size across all CPUs.
+struct SlabGeom {
+    /// Per-class `(header_off, lock_off, slots_off)` within a CPU block.
+    classes_loc: crate::SysVec<ClassLoc>,
+    /// Power-of-two log2 of the per-CPU block stride.
+    shift: u32,
+    /// Per-CPU block stride (`1 << shift`).
+    stride: usize,
+    /// Total slab metadata bytes (`stride * num_cpus`).
+    slab_bytes: usize,
+}
+
 impl SubHeapBuilder {
     pub fn new(name: &'static str, budget_bytes: usize) -> Self {
         Self {
@@ -1552,16 +1712,21 @@ impl SubHeapBuilder {
         self
     }
 
-    /// Build a standalone sub-heap with its own reservation (Phase 1 / tests).
-    /// Pre-populates every class's central list to fill the budget.
-    pub fn build_standalone(self) -> Result<SubHeap, crate::sys::ReserveError> {
-        let num_classes = sizeclass::NUM_CLASSES;
-        let num_shards = self
-            .num_shards
-            .unwrap_or_else(|| (self.num_cpus * SHARDS_PER_CPU).clamp(1, MAX_SHARDS));
+    /// Number of central-list home shards, resolving the `num_shards` override.
+    #[inline]
+    fn resolved_num_shards(&self) -> u32 {
+        self.num_shards
+            .unwrap_or_else(|| (self.num_cpus * SHARDS_PER_CPU).clamp(1, MAX_SHARDS))
+    }
 
-        // --- compute per-CPU block geometry ---
-        // Block layout: [ Header[num_classes] | lock[num_classes] | slots... ]
+    /// Compute the per-CPU slab block geometry (shared by both build paths).
+    ///
+    /// Block layout per CPU: `[ Header[num_classes] | lock[num_classes] | slots... ]`,
+    /// with per-class slot capacity size-tiered by [`cap_for_class`]. The block is
+    /// rounded up to a power-of-two stride so the rseq slab can index a CPU's block
+    /// with a shift.
+    fn compute_slab_geom(&self) -> SlabGeom {
+        let num_classes = sizeclass::NUM_CLASSES;
         let headers_bytes = num_classes * core::mem::size_of::<Header>();
         let locks_bytes = num_classes * 4;
         let mut off = (headers_bytes + locks_bytes + 7) & !7;
@@ -1582,49 +1747,85 @@ impl SubHeapBuilder {
         let shift = (usize::BITS - (block_bytes.max(1) - 1).leading_zeros()) as u32;
         let stride = 1usize << shift;
         let slab_bytes = stride * self.num_cpus as usize;
+        SlabGeom {
+            classes_loc,
+            shift,
+            stride,
+            slab_bytes,
+        }
+    }
 
-        // --- object storage: enough to fill the budget across classes ---
-        // Phase 1 keeps it simple: reserve slab metadata + a flat object arena
-        // sized to the budget, and carve objects per class lazily into central.
-        let total = slab_bytes + self.budget_bytes;
-        let reservation = Reservation::reserve(total)?;
-        let base = reservation.base();
+    /// Assemble a `SubHeap<M>` from pre-computed parts: the slab metadata lives at
+    /// `slab_base`, the object arena at `[arena_base, arena_base + budget_bytes)`,
+    /// and the metadata array is sized `num_spans * (SPAN_BYTES / min_osz)`.
+    ///
+    /// `arena_reservation` keeps an OWNED arena alive (standalone); `slab_reservation`
+    /// keeps a separately-reserved slab alive when the arena is borrowed (`build_over`).
+    /// Exactly one storage story applies per path, so one of the two is always `None`.
+    ///
+    /// # Safety
+    /// `slab_base` points at `geom.slab_bytes` of live, writable, 8-aligned storage
+    /// (held by whichever reservation owns it) for the sub-heap's lifetime;
+    /// `[arena_base, arena_base + budget_bytes)` is live + writable + span-grid
+    /// origin at `arena_base`; `min_osz >= MIN_ALIGN` and no real class is smaller.
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn build_from_parts<M: FrameMeta + Send + Sync>(
+        &self,
+        slab_base: NonNull<u8>,
+        arena_base: *mut u8,
+        budget_bytes: usize,
+        min_osz: usize,
+        geom: SlabGeom,
+        num_shards: u32,
+        arena_reservation: Option<Reservation>,
+        slab_reservation: Option<Reservation>,
+    ) -> SubHeap<M> {
+        let num_classes = sizeclass::NUM_CLASSES;
+        let SlabGeom {
+            classes_loc,
+            shift,
+            stride,
+            slab_bytes: _,
+        } = geom;
 
-        // Initialize per-CPU headers (capacity per class).
+        // Initialize per-CPU headers (capacity per class). Locks + slots are already
+        // zero (both a fresh reservation and the standalone arena tail are zeroed).
         for cpu in 0..self.num_cpus as usize {
-            let blk = unsafe { base.as_ptr().add(cpu * stride) };
+            let blk = slab_base.as_ptr().add(cpu * stride);
             for c in 0..num_classes {
-                let hdr = unsafe { blk.add(c * core::mem::size_of::<Header>()) as *mut Header };
-                unsafe {
-                    (*hdr).current = 0;
-                    (*hdr).capacity = cap_for_class(c, self.cap_per_class);
-                }
-                // locks already zero (free) from mmap/zeroed reservation.
+                let hdr = blk.add(c * core::mem::size_of::<Header>()) as *mut Header;
+                (*hdr).current = 0;
+                (*hdr).capacity = cap_for_class(c, self.cap_per_class);
             }
         }
 
         let classes_loc: &'static [ClassLoc] =
             allocator_api2::boxed::Box::leak(classes_loc.into_boxed_slice());
-        let slab = unsafe { SlabLayout::new(base, self.num_cpus, shift, classes_loc) };
+        // SAFETY: slab_base points at slab_bytes of live, carved, 8-aligned storage.
+        let slab = SlabLayout::new(slab_base, self.num_cpus, shift, classes_loc);
 
-        // The object arena follows the slab metadata. Fresh objects are carved
-        // from it on demand by whichever class needs them; the byte budget (not
-        // the arena split) is the real limit. We size the arena to the budget
-        // (rounded down by alignment) so it only drains at true exhaustion.
-        let arena_base = unsafe { base.as_ptr().add(slab_bytes) };
+        // Fresh objects are carved from the arena on demand by whichever class needs
+        // them; the byte budget (not the arena split) is the real limit.
         let arena = BumpArena {
             cursor: core::sync::atomic::AtomicUsize::new(arena_base as usize),
-            end: arena_base as usize + self.budget_bytes,
+            end: arena_base as usize + budget_bytes,
             base: arena_base as usize,
         };
-        let spans = super::meta::SpanTable::new(arena_base, self.budget_bytes);
-        let bitmaps = super::meta::SpanBitmaps::new(arena_base, self.budget_bytes);
-        let large = LargeAllocator::new(arena_base, self.budget_bytes);
+        let spans = super::meta::SpanTable::new(arena_base, budget_bytes);
+        let bitmaps = super::meta::SpanBitmaps::new(arena_base, budget_bytes);
+        let large = LargeAllocator::new(arena_base, budget_bytes);
         // Central pools sharded by home: `num_shards` rows of `num_classes`.
         let central =
             crate::sys_boxed_slice(num_shards as usize * num_classes, |_| CentralList::new());
 
-        Ok(SubHeap {
+        // Out-of-band metadata array, `num_spans * slots_per_span` slots (zero-sized
+        // for M = ()). Sized by `min_osz`: any real object of size >= min_osz yields
+        // an intra-span slot < slots_per_span, so obj_index stays in range.
+        let num_spans = budget_bytes.div_ceil(super::meta::SPAN_BYTES);
+        let slots_per_span = super::meta::SPAN_BYTES / min_osz;
+        let meta = crate::sys_boxed_slice(num_spans * slots_per_span, |_| M::default());
+
+        SubHeap {
             name: self.name,
             on_exhaust: self.on_exhaust,
             slab,
@@ -1634,10 +1835,100 @@ impl SubHeapBuilder {
             arena,
             spans,
             large,
-            budget_bytes: self.budget_bytes,
+            budget_bytes,
             counters: PerCpuCounters::new(self.num_cpus),
-            _reservation: Some(reservation),
+            meta,
+            min_osz,
+            _reservation: arena_reservation,
+            _slab_reservation: slab_reservation,
+        }
+    }
+
+    /// Build a standalone sub-heap with its own reservation (Phase 1 / tests).
+    /// Pre-populates every class's central list to fill the budget.
+    ///
+    /// The slab metadata and the object arena share one owned reservation (slab
+    /// first, arena after), and the metadata index granularity is `MIN_ALIGN` (8) —
+    /// full density, exactly toccata's original behavior. `M = ()`.
+    pub fn build_standalone(self) -> Result<SubHeap<()>, crate::sys::ReserveError> {
+        let num_shards = self.resolved_num_shards();
+        let geom = self.compute_slab_geom();
+
+        // Reserve slab metadata + a flat object arena sized to the budget in ONE
+        // owned reservation; the arena follows the slab metadata.
+        let total = geom.slab_bytes + self.budget_bytes;
+        let reservation = Reservation::reserve(total)?;
+        let base = reservation.base();
+        let arena_base = unsafe { base.as_ptr().add(geom.slab_bytes) };
+
+        // SAFETY: `base` holds `slab_bytes + budget_bytes` of live, locked, 8-aligned
+        // storage; the slab lives at `base`, the arena at `base + slab_bytes`.
+        Ok(unsafe {
+            self.build_from_parts(
+                base,
+                arena_base,
+                self.budget_bytes,
+                sizeclass::MIN_ALIGN,
+                geom,
+                num_shards,
+                Some(reservation),
+                None,
+            )
         })
+    }
+
+    /// Build a sub-heap **over a caller-supplied region** `[base, base+len)` — the
+    /// arena IS that borrowed region, with **no toccata metadata inside it** (e.g. an
+    /// AF_XDP UMEM the kernel DMAs into). The slab metadata is reserved in the
+    /// sub-heap's OWN [`Reservation`] so the DMAing kernel can never clobber it; the
+    /// out-of-band `M` array is likewise reserved out of band, so per-object
+    /// refcounts / ownership tags survive the arena being overwritten.
+    ///
+    /// `min_osz` is the metadata index granularity (the smallest object size any
+    /// class handed out from this sub-heap can be, >= `MIN_ALIGN`); the `M` array is
+    /// sized `num_spans * (SPAN_BYTES / min_osz)`. A larger `min_osz` shrinks the
+    /// array at the cost of denser packing not being representable — pick the class
+    /// floor the caller actually uses.
+    ///
+    /// The arena base is used **directly** (not aligned up): standalone's arena base
+    /// is itself only page-aligned, and the whole design indexes spans relative to
+    /// the arena base, so a page-aligned `base` round-trips exactly and keeps a UMEM
+    /// offset `= ptr - base` lossless.
+    ///
+    /// # Safety
+    /// `[base, base+len)` must be valid, writable, and outlive the sub-heap; it must
+    /// be handed to **at most one** sub-heap; and it must be large enough to hold at
+    /// least one span (`len >= SPAN_BYTES`). Unlike [`build_standalone`], the borrowed
+    /// arena carries **no anti-stall guarantee** (toccata neither locks nor populates
+    /// it) — that is the caller's responsibility.
+    pub unsafe fn build_over<M: FrameMeta + Send + Sync>(
+        self,
+        base: NonNull<u8>,
+        len: usize,
+        min_osz: usize,
+    ) -> Result<SubHeap<M>, crate::sys::ReserveError> {
+        let num_shards = self.resolved_num_shards();
+        let geom = self.compute_slab_geom();
+
+        // Reserve ONLY the slab metadata in our own reservation, so the kernel that
+        // DMAs the borrowed arena can't clobber the slab. The arena is the borrowed
+        // region itself (no toccata metadata inside it).
+        let slab_res = Reservation::reserve(geom.slab_bytes)?;
+        let slab_base = slab_res.base();
+
+        // SAFETY: `slab_base` holds `slab_bytes` of live, locked, 8-aligned storage;
+        // the borrowed arena satisfies the caller's `build_over` contract (valid,
+        // writable, single-owner, >= one span). Use `base` DIRECTLY as the arena base.
+        Ok(self.build_from_parts(
+            slab_base,
+            base.as_ptr(),
+            len,
+            min_osz,
+            geom,
+            num_shards,
+            None,
+            Some(slab_res),
+        ))
     }
 }
 
@@ -1652,4 +1943,184 @@ fn default_num_cpus() -> u32 {
     std::thread::available_parallelism()
         .map(|n| n.get() as u32)
         .unwrap_or(4)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::frame::RefCount;
+    use core::sync::atomic::AtomicU64;
+
+    /// A page-aligned heap buffer standing in for a caller-supplied (UMEM-style)
+    /// region for `build_over`. **Leaked** so it outlives the sub-heap (the
+    /// `build_over` safety contract). Tests are few and short-lived, so the leak is
+    /// harmless. Page (not span) alignment on purpose: it exercises the same
+    /// arena-relative span indexing `build_standalone` relies on (its arena base is
+    /// only page-aligned too).
+    fn fake_region(len: usize) -> (NonNull<u8>, usize) {
+        let layout = std::alloc::Layout::from_size_align(len, 4096).expect("layout");
+        // SAFETY: non-zero len; freshly allocated, zeroed, exclusively owned.
+        let p = unsafe { std::alloc::alloc_zeroed(layout) };
+        let base = NonNull::new(p).expect("region alloc");
+        (base, len)
+    }
+
+    /// Build an `M`-typed sub-heap over a fake borrowed region. Small `num_cpus`/
+    /// `cap_per_class` keep the (owned, locked) slab reservation tiny so the test
+    /// runs under a low `RLIMIT_MEMLOCK`. `min_osz = MIN_ALIGN` = full density.
+    fn over_subheap<M: FrameMeta + Send + Sync>(len: usize) -> (SubHeap<M>, NonNull<u8>, usize) {
+        let (base, len) = fake_region(len);
+        // SAFETY: `base..base+len` is a live, writable, single-owner, leaked region
+        // (outlives the heap) of >= one span.
+        let sh = unsafe {
+            SubHeapBuilder::new("over", len)
+                .num_cpus(4)
+                .cap_per_class(16)
+                .build_over::<M>(base, len, sizeclass::MIN_ALIGN)
+                .expect("build_over slab reservation should succeed")
+        };
+        (sh, base, len)
+    }
+
+    const SPAN: usize = super::super::meta::SPAN_BYTES;
+
+    /// `build_over::<RefCount>`: a retained object survives a first free (on_free →
+    /// Keep) and is reclaimed only on the last (on_free → Free). Mirrors
+    /// `frame::tests::refcount_reclaims_only_on_last_release`.
+    #[test]
+    fn build_over_refcount_reclaims_only_on_last_release() {
+        let (sh, _base, _len) = over_subheap::<RefCount>(64 * SPAN);
+        let class = sizeclass::class_for(64).unwrap();
+        let p = sh.alloc_class(class).expect("alloc within budget");
+        assert_eq!(sh.meta(p, class).count(), 1, "alloc sets refcount to 1");
+
+        // Bump to 2 (a clone), then free once: on_free → Keep, object stays live.
+        sh.meta(p, class).retain();
+        assert_eq!(sh.meta(p, class).count(), 2);
+        unsafe { sh.dealloc_by_ptr(p) };
+        assert_eq!(
+            sh.meta(p, class).count(),
+            1,
+            "still held after a non-last release"
+        );
+        // live_bytes must NOT have dropped: the Keep gate returned before accounting.
+        assert_eq!(
+            sh.live_bytes(),
+            sizeclass::size_of_class(class),
+            "Keep must not free or account"
+        );
+
+        // Free again: on_free → Free, now reclaimed and accounted.
+        unsafe { sh.dealloc_by_ptr(p) };
+        assert_eq!(sh.meta(p, class).count(), 0);
+        assert_eq!(sh.live_bytes(), 0, "last release frees + accounts");
+    }
+
+    /// `into_addr`/`from_addr` round-trip over a borrowed arena: the offset a ring
+    /// would speak reconstitutes exactly the original pointer.
+    #[test]
+    fn build_over_into_from_addr_roundtrip() {
+        let (sh, base, _len) = over_subheap::<()>(64 * SPAN);
+        let class = sizeclass::class_for(128).unwrap();
+        let p = sh.alloc_class(class).expect("alloc");
+        let addr = sh.into_addr(p);
+        // Offset is relative to the borrowed base (lossless UMEM addressing).
+        assert_eq!(addr as usize, p.as_ptr() as usize - base.as_ptr() as usize);
+        let p2 = unsafe { sh.from_addr(addr) };
+        assert_eq!(p2, p, "from_addr(into_addr(p)) == p");
+        unsafe { sh.dealloc_by_ptr(p2) };
+    }
+
+    /// Class-from-offset: alloc two different sizes, free BOTH by
+    /// `dealloc_by_ptr(from_addr(offset))` with no class hint (the span table
+    /// recovers the class), then confirm the space is reallocatable.
+    #[test]
+    fn build_over_dealloc_by_offset_recovers_class() {
+        let (sh, _base, _len) = over_subheap::<()>(64 * SPAN);
+        let ca = sizeclass::class_for(64).unwrap();
+        let cb = sizeclass::class_for(1024).unwrap();
+        let a = sh.alloc_class(ca).expect("alloc a");
+        let b = sh.alloc_class(cb).expect("alloc b");
+        assert_ne!(ca, cb);
+
+        let (addr_a, addr_b) = (sh.into_addr(a), sh.into_addr(b));
+        // Free purely by offset → pointer → span-table class lookup. No class hint.
+        unsafe { sh.dealloc_by_ptr(sh.from_addr(addr_a)) };
+        unsafe { sh.dealloc_by_ptr(sh.from_addr(addr_b)) };
+        assert_eq!(sh.live_bytes(), 0, "both freed");
+
+        // Reallocatable afterwards.
+        assert!(sh.alloc_class(ca).is_some());
+        assert!(sh.alloc_class(cb).is_some());
+    }
+
+    /// M survives the arena being overwritten wholesale (the out-of-band invariant):
+    /// set a field in M, scribble 0xFF over the ENTIRE borrowed arena (as a kernel
+    /// DMA would), and confirm M is intact.
+    #[test]
+    fn build_over_meta_survives_arena_overwrite() {
+        #[derive(Default)]
+        struct Tag(AtomicU64);
+        impl FrameMeta for Tag {
+            fn on_alloc(&self) {}
+            fn on_free(&self) -> Reclaim {
+                Reclaim::Free
+            }
+        }
+
+        let (sh, base, len) = over_subheap::<Tag>(64 * SPAN);
+        let class = sizeclass::class_for(256).unwrap();
+        let p = sh.alloc_class(class).expect("alloc");
+        sh.meta(p, class).0.store(0xDEAD_BEEF, Ordering::Relaxed);
+
+        // Clobber the WHOLE arena (the borrowed region), exactly as a kernel DMA of
+        // a received packet over the frame body would.
+        unsafe { std::ptr::write_bytes(base.as_ptr(), 0xFF, len) };
+
+        assert_eq!(
+            sh.meta(p, class).0.load(Ordering::Relaxed),
+            0xDEAD_BEEF,
+            "metadata is out of band — untouched by the arena overwrite"
+        );
+        unsafe { sh.dealloc_by_ptr(p) };
+    }
+
+    /// `M = ()` build_over: plain sub-heap semantics — alloc/`dealloc_by_ptr` works
+    /// and the first free reclaims (on_free → Free folds away).
+    #[test]
+    fn build_over_unit_meta_frees_on_first_dealloc() {
+        let (sh, _base, _len) = over_subheap::<()>(64 * SPAN);
+        let class = sizeclass::class_for(64).unwrap();
+        let p = sh.alloc_class(class).expect("alloc");
+        assert_eq!(sh.live_bytes(), sizeclass::size_of_class(class));
+        unsafe { sh.dealloc_by_ptr(p) };
+        assert_eq!(sh.live_bytes(), 0, "M = () frees on the first dealloc");
+    }
+
+    /// Large path over a borrowed arena: an object larger than `MAX_SMALL` retains +
+    /// double-frees through the same on_free reclaim gate (slot 0 of the head span).
+    #[test]
+    fn build_over_large_refcount_reclaim_gate() {
+        // A run of a few spans, big enough for a > MAX_SMALL object plus room.
+        let (sh, _base, _len) = over_subheap::<RefCount>(64 * SPAN);
+        let size = sizeclass::MAX_SMALL + 1; // forces the large path
+        assert!(sizeclass::class_for(size).is_none(), "must be a large request");
+        let p = sh.alloc_large(size).expect("large alloc within budget");
+        let live_after_alloc = sh.live_bytes();
+        assert!(live_after_alloc >= size, "large alloc accounted");
+
+        // A large object sits at slot 0 of its head span (its pointer IS the span
+        // base), so its metadata slot is `large_meta_index(p)`. Bump the refcount
+        // there, then free twice through the same on_free reclaim gate.
+        assert_eq!(sh.meta[sh.large_meta_index(p)].count(), 1, "alloc set count 1");
+        sh.meta[sh.large_meta_index(p)].retain();
+        unsafe { sh.dealloc_by_ptr(p) }; // on_free → Keep
+        assert_eq!(
+            sh.live_bytes(),
+            live_after_alloc,
+            "Keep must not free the large run or account"
+        );
+        unsafe { sh.dealloc_by_ptr(p) }; // on_free → Free
+        assert_eq!(sh.live_bytes(), 0, "last release frees the large run");
+    }
 }
