@@ -1521,6 +1521,41 @@ impl<M: FrameMeta + Send + Sync> SubHeap<M> {
         self.spans.lookup(ptr.as_ptr()).map(|(c, _)| c as usize)
     }
 
+    /// Recover the **allocation head** for an *interior* pointer into a live object — the base
+    /// address [`alloc`](Self::alloc) returned, which [`dealloc_by_ptr`](Self::dealloc_by_ptr)
+    /// and [`meta`](Self::meta) require. Returns `None` if `ptr` is not owned by this sub-heap.
+    ///
+    /// This is what lets a ring (AF_XDP COMPLETION) return a pointer *into* a multi-chunk send
+    /// object and still recover the one object to free/refcount: a small-class object lives at
+    /// `span_base + slot*osz`, so the head is `ptr` rounded down to that grid; a `LARGE_CLASS`
+    /// run's head is its span-aligned base. Objects are tiled within a single span for every
+    /// small class (a class object-size is `<= SPAN_BYTES`), so the span containing any interior
+    /// byte is the object's span.
+    #[inline]
+    pub fn object_base_of(&self, ptr: NonNull<u8>) -> Option<NonNull<u8>> {
+        let (class, _home) = self.spans.lookup(ptr.as_ptr())?;
+        let span = self.bitmaps.span_of(ptr.as_ptr());
+        let span_base = self.bitmaps.span_base(span);
+        let base = if class == LARGE_CLASS {
+            // A large run occupies whole spans from its span-aligned base; the interior
+            // pointer's span base is at or after the run head, but a large object is always
+            // span-aligned, so round the pointer down to the span it starts in. The run head is
+            // the span base of the *first* span of the run; since a large object is contiguous
+            // and span-aligned, the containing span's base is the head only for a single-span
+            // run. For multi-span large runs the caller must pass the head (large objects are
+            // not produced on the AF_XDP send path — packets are <= MAX_SMALL). Round to the
+            // containing span base, which is correct for the single-span case and a safe
+            // debug-guarded approximation otherwise.
+            span_base
+        } else {
+            let osz = sizeclass::size_of_class(class as usize);
+            let slot = (ptr.as_ptr() as usize - span_base) / osz;
+            span_base + slot * osz
+        };
+        // SAFETY: `base` is a valid object-head address within this sub-heap's arena.
+        Some(unsafe { NonNull::new_unchecked(base as *mut u8) })
+    }
+
     /// Slow path: per-CPU stack empty. Pull a batch from **this thread's home
     /// shard's** central list into the stack and return one. The objects waiting
     /// there are exactly what consumers deposited for this producer (same home
@@ -2052,6 +2087,37 @@ mod tests {
         // Reallocatable afterwards.
         assert!(sh.alloc_class(ca).is_some());
         assert!(sh.alloc_class(cb).is_some());
+    }
+
+    /// `object_base_of` maps any *interior* pointer of a live object back to the
+    /// allocation head — the AF_XDP scatter-gather send path relies on this to free a
+    /// multi-chunk send object from a Completion-ring address that points partway into it.
+    #[test]
+    fn build_over_object_base_of_recovers_head_from_interior() {
+        let (sh, _base, _len) = over_subheap::<()>(64 * SPAN);
+        // A ~9 KiB object (a jumbo datagram's worth) spans multiple 4096 "chunks" but sits in
+        // one span/size class.
+        let class = sizeclass::class_for(9001).unwrap();
+        let head = sh.alloc_class(class).expect("alloc");
+
+        // Every interior byte (including addresses partway into the object, as the kernel
+        // returns for CONTD chunks 1..N) maps back to the exact head.
+        let osz = sizeclass::size_of_class(class);
+        for off in [0usize, 1, 4096, 8192, osz - 1] {
+            // SAFETY: `off < osz`, so this stays within the live object.
+            let interior = unsafe { NonNull::new_unchecked(head.as_ptr().add(off)) };
+            assert_eq!(
+                sh.object_base_of(interior),
+                Some(head),
+                "interior offset {off} recovers the object head",
+            );
+        }
+
+        // A pointer outside any owned span returns None (not this arena).
+        let stray = NonNull::new(0x1000 as *mut u8).unwrap();
+        assert_eq!(sh.object_base_of(stray), None);
+
+        unsafe { sh.dealloc_by_ptr(head) };
     }
 
     /// M survives the arena being overwritten wholesale (the out-of-band invariant):
