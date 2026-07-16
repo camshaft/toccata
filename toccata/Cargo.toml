@@ -25,5 +25,5 @@ supervisor = ["toccata-core/supervisor"]
 # core SubHeap/sys surface). The rseq fast path is not a feature — it
 # auto-compiles on Linux x86_64/aarch64.
 toccata-core = { workspace = true }
-ctor = "0.2"
+ctor = "1.0"
 libc.workspace = true
